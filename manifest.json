@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "EV.IO UI Enhancer",
-  "version": "3.0",
-  "description": "Enhances ev.io with a lobby browser and player-hosted custom lobbies — host or join real matches peer-to-peer, with a live in-page admin panel to tune maps, bots, and match settings.",
+  "version": "3.1",
+  "description": "Enhances ev.io with a lobby browser and player-hosted custom lobbies — host or join matches peer-to-peer, with live settings.",
   "permissions": ["storage", "tabs", "offscreen"],
   "host_permissions": [
     "https://ev.io/*",
