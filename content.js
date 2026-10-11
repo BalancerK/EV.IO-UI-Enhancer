@@ -1129,12 +1129,30 @@ window.addEventListener('load', () => {
     // stop. This is also fire-and-forget: it may well lose the race with background.js's
     // teardown timer on a sufficiently slow page load, which is fine — worst case, hosting ends
     // a few seconds later than it would have otherwise.
-    chrome.runtime.sendMessage({ type: 'getHostingStatus' }).then((resp) => {
-        if (resp && resp.ok && resp.hosting && !hostingPort) {
-            attachHostingPort(resp.lobbyCode);
-            setHostStatus('Hosting — lobby code: ' + hostingLobbyCode, false);
-            showShareLink(resp.lobbyCode);
-        }
+    function reconnectHostingPortIfNeeded() {
+        chrome.runtime.sendMessage({ type: 'getHostingStatus' }).then((resp) => {
+            if (resp && resp.ok && resp.hosting && !hostingPort) {
+                attachHostingPort(resp.lobbyCode);
+                setHostStatus('Hosting — lobby code: ' + hostingLobbyCode, false);
+                showShareLink(resp.lobbyCode);
+            }
+        });
+    }
+    reconnectHostingPortIfNeeded();
+
+    // A page Chrome puts into the back/forward cache (navigating away via back/forward, or in
+    // some cases a same-origin SPA-style navigation) has every chrome.runtime.Port it held closed
+    // by the browser itself — by design, so an extension can never block instant bfcache restore.
+    // That's where "the page keeping the extension port is moved into back/forward cache" comes
+    // from; it's expected Chrome behavior, not a sign anything broke. What IS a real gap: nothing
+    // previously re-ran the reconnect logic above when the SAME page is later restored FROM
+    // bfcache (pageshow fires with persisted=true, but the page never re-executes its own
+    // top-level script — there is no second "page load" to trigger it from). Without this, a host
+    // who navigated back/forward while hosting would either lose their lobby once
+    // HOST_TEARDOWN_GRACE_MS elapsed with nothing reconnecting, or — even if they returned inside
+    // that window — be left with a permanently dead port that never got re-attached.
+    window.addEventListener('pageshow', (e) => {
+        if (e.persisted) reconnectHostingPortIfNeeded();
     });
 
     // ----------------- module panel -----------------
