@@ -527,19 +527,6 @@
 
     const patches = [
         {
-            // Mis-assessed last cleanup pass as a generic, rarely-relevant safety net — it's not.
-            // This guards Qto0i2z, the SOUND engine's per-tick update: it loops bullet/shot events
-            // and looks up each shooter's player entity from the state's roster to pick the right
-            // shoot sound. On the custom server, a shot event can reference a shooter whose entity
-            // hasn't been (re)registered in that exact snapshot yet — far more likely here than
-            // against official's own timing — and the resulting uncaught exception aborts the rest
-            // of that frame's update chain, including the weapon-slot/HUD work scheduled after it.
-            // Confirmed live: removing this made the primary weapon not show up in a custom lobby.
-            name: '6a  undefined player crash guard',
-            from: 'var Q=n.Qa7phk3[p.Qxluan],f=hb.Qhkjwni.Qqg43ev().dataById[Q.Qslw9vf];',
-            to:   'var Q=n.Qa7phk3[p.Qxluan];if(void 0===Q)continue;var f=hb.Qhkjwni.Qqg43ev().dataById[Q.Qslw9vf];',
-        },
-        {
             name: '6b7 custom-mode: skip pitch + pitchOffset (production comparator)',
             from: 'Math.abs(e.Qcrzrpr-t.Qcrzrpr)>1e-4||Math.abs(e.Qd0yy90-t.Qd0yy90)>1e-4||',
             to:   '(!(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)&&(Math.abs(e.Qcrzrpr-t.Qcrzrpr)>1e-4||Math.abs(e.Qd0yy90-t.Qd0yy90)>1e-4))||',
@@ -563,59 +550,6 @@
             name: 'SR1 forward exact shot ray + sessionId to custom server',
             from: "u.push({Q7q6byi:f+':'+p+':'+a,Q616y7o:0,Qxluan:p,Qtql1ud:l.clone(),Qsjaj00:v,",
             to:   "(window.__EVIO_EXT_SHOTRAY__&&window.__EVIO_EXT_SHOTRAY__(l,v,f+':'+p+':'+a)),u.push({Q7q6byi:f+':'+p+':'+a,Q616y7o:0,Qxluan:p,Qtql1ud:l.clone(),Qsjaj00:v,",
-        },
-        {
-            // Also restored, same reasoning as 6a. This is the per-PEER health-bar/nameplate
-            // render step (confirmed against the real bundle: sets the nameplate sprite's
-            // .position, toggles its .visible by HP, draws its canvas text) — called once per
-            // peer inside a loop. If the previous-frame snapshot `h` is missing for one peer, the
-            // original code throws reading h.Qdsukt4, and an uncaught exception here aborts the
-            // REST of that per-frame loop for every peer processed after it in the same pass —
-            // plausibly including weapon-slot/model work for later entries. Confirmed live:
-            // restoring 6a alone did not fix "primary weapon doesn't show up"; this is the next
-            // most likely candidate by the same mechanism, and is a pure null-guard regardless —
-            // safe to have unconditionally, identical behavior whenever `h` is actually present.
-            name: 'HB3 health-bar: guard the position lerp against a missing previous frame',
-            from: 'n.copy(h.Qdsukt4).lerp(c.Qdsukt4,e.Qzh2kcz)',
-            to:   'n.copy((h||c).Qdsukt4).lerp(c.Qdsukt4,e.Qzh2kcz)',
-        },
-        {
-            // Restored. Neither 6a nor HB3 fixed the reported "primary weapon doesn't show up in
-            // a custom lobby" regression (confirmed live, both extension and VPS) — this is the
-            // actual cause. Removing these four entirely (rather than just gating them, which was
-            // already correct and stays) took away a real safety net against a runaway
-            // reconciliation failure: Qak2r7y (the reconciler) returns -1 ("Divergence check
-            // failed, no match for server state found locally") whenever it can't find a matching
-            // local snapshot for an echoed tick, and the fallback path (bundle :27354) is
-            // `this.Qgx464++` — UNBOUNDED growth with no cap. Once that starts,
-            // Qxo2o14[0].Q1o118x ("Global tick", built from Qgx464) drifts further from reality
-            // every tick, which makes EVERY subsequent reconcile attempt less likely to find a
-            // match too — a self-reinforcing spiral, not a one-off. Qak2r7y is also where weapon/
-            // recoil/ammo state gets rebuilt on a successful match
-            // (this.Qxo2o14[t].Qt03jhz.Qcvr9bt=...Qh23rk3.Q820rrc(e.body), see 6b8's own comment
-            // on why that matters) — once reconciliation stops succeeding at all, that state stops
-            // being restored too, consistent with getting stuck on whatever was equipped at the
-            // exact moment it broke (reported as "looks like sword-only, only melee shows up").
-            // Gated to custom mode only, same as before — this was never official play's problem,
-            // only ours.
-            name: '6d3 custom-mode: clamp incoming Q1o1c43 to ±3',
-            from: 'this.Qjdbmai=o.body,this.Q1o1c43=o.sync;',
-            to:   'this.Qjdbmai=o.body,this.Q1o1c43=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.max(-3,Math.min(3,o.sync)):o.sync;',
-        },
-        {
-            name: '6d4 custom-mode: clamp Q1o1c43 in loading path',
-            from: 'this.Q1o1c43=this.Qorty0h.length-1,this.Qobex5z',
-            to:   'this.Q1o1c43=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.min(this.Qorty0h.length-1,3):this.Qorty0h.length-1,this.Qobex5z',
-        },
-        {
-            name: 'K1  custom-mode: cap Qgx464 from server RTT delta to 3 ticks (150ms max)',
-            from: 's>=0&&(this.Qgx464=s)',
-            to:   's>=0&&(this.Qgx464=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.min(s,3):s)',
-        },
-        {
-            name: 'K2  custom-mode: cap Qgx464 no-state-increment to 3 ticks (150ms max)',
-            from: 'this.Qjdbmah=this.Qjdbmai,this.Qgx464++,this.Qjtawf1',
-            to:   'this.Qjdbmah=this.Qjdbmai,this.Qgx464=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.min(this.Qgx464+1,3):this.Qgx464+1,this.Qjtawf1',
         },
     ];
 
