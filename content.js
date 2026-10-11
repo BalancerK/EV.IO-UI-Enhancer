@@ -726,6 +726,19 @@ window.addEventListener('load', () => {
         paintHostingButton();
     }
 
+    // Navigating to your OWN lobby's ?evioCustom= link (the Custom-tab row click, or the new
+    // "Join Lobby" button) is a same-origin navigation, which Chrome is free to serve via bfcache
+    // — and a bfcache-EVICTED port is what logs "the page keeping the extension port is moved
+    // into back/forward cache ... Unchecked runtime.lastError" to the console. pageshow's
+    // persisted=true (handled above) covers coming BACK from that; this covers LEAVING: disconnect
+    // our own port cleanly before the browser gets a chance to force-close it, so the eviction
+    // path — and its console warning — never triggers in the first place. Purely cosmetic either
+    // way: the grace-period teardown in background.js already tolerates this exact disconnect
+    // (that's what it exists for), so this changes nothing about actual hosting behavior.
+    window.addEventListener('pagehide', () => {
+        if (hostingPort) { try { hostingPort.disconnect(); } catch (e) { /* already gone */ } }
+    });
+
     async function startHosting() {
         const nameInput = document.getElementById('ev-host-name');
         const name = nameInput ? nameInput.value.trim() : '';
