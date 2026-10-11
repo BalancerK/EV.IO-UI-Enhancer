@@ -567,24 +567,39 @@
             to:   'n.copy((h||c).Qdsukt4).lerp(c.Qdsukt4,e.Qzh2kcz)',
         },
         {
-            name: '6d3 clamp incoming Q1o1c43 to ±3',
+            // Qgx464 ("Ticks ahead", confirmed against the real bundle's own debug label) and
+            // Q1o1c43 ("sync") are both DIRECT measures of the player's real round-trip latency
+            // in ticks — Qgx464 specifically comes from `e.body.Qwhlcfo - Qxo2o14[t].Qjdbmai.Qwhlcfo`,
+            // literally "how many ticks has the server advanced since I sent the input this echo
+            // answers" (bundle :27376). These four patches (6d3/6d4/K1/K2) were all unconditional —
+            // applied even on OFFICIAL play — and all clamp that measurement to 3 ticks (150ms).
+            // For anyone with real RTT UNDER 150ms this is a no-op; for anyone over it (confirmed
+            // live: a 200-300ms SEA player saw ~25% of their own shots on the OFFICIAL server not
+            // register), the client's own tick-ahead bookkeeping gets clamped below what their
+            // real connection needs, which is a straightforwardly wrong thing to do to a stock,
+            // unmodified official-server connection this extension had no business touching at
+            // all. Gated to custom mode only now, same convention as every other patch here that
+            // changes gameplay-affecting behavior (6b7/6b8/6b9) — if this clamp is genuinely
+            // needed against OUR OWN server's own reconciliation quirks, that's where it stays
+            // relevant; it was never officially play's problem to begin with.
+            name: '6d3 custom-mode: clamp incoming Q1o1c43 to ±3',
             from: 'this.Qjdbmai=o.body,this.Q1o1c43=o.sync;',
-            to:   'this.Qjdbmai=o.body,this.Q1o1c43=Math.max(-3,Math.min(3,o.sync));',
+            to:   'this.Qjdbmai=o.body,this.Q1o1c43=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.max(-3,Math.min(3,o.sync)):o.sync;',
         },
         {
-            name: '6d4 clamp Q1o1c43 in loading path',
+            name: '6d4 custom-mode: clamp Q1o1c43 in loading path',
             from: 'this.Q1o1c43=this.Qorty0h.length-1,this.Qobex5z',
-            to:   'this.Q1o1c43=Math.min(this.Qorty0h.length-1,3),this.Qobex5z',
+            to:   'this.Q1o1c43=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.min(this.Qorty0h.length-1,3):this.Qorty0h.length-1,this.Qobex5z',
         },
         {
-            name: 'K1  cap Qgx464 from server RTT delta to 3 ticks (150ms max)',
+            name: 'K1  custom-mode: cap Qgx464 from server RTT delta to 3 ticks (150ms max)',
             from: 's>=0&&(this.Qgx464=s)',
-            to:   's>=0&&(this.Qgx464=Math.min(s,3))',
+            to:   's>=0&&(this.Qgx464=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.min(s,3):s)',
         },
         {
-            name: 'K2  cap Qgx464 no-state-increment to 3 ticks (150ms max)',
+            name: 'K2  custom-mode: cap Qgx464 no-state-increment to 3 ticks (150ms max)',
             from: 'this.Qjdbmah=this.Qjdbmai,this.Qgx464++,this.Qjtawf1',
-            to:   'this.Qjdbmah=this.Qjdbmai,this.Qgx464=Math.min(this.Qgx464+1,3),this.Qjtawf1',
+            to:   'this.Qjdbmah=this.Qjdbmai,this.Qgx464=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.min(this.Qgx464+1,3):this.Qgx464+1,this.Qjtawf1',
         },
     ];
 
