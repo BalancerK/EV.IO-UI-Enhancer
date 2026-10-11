@@ -527,6 +527,19 @@
 
     const patches = [
         {
+            // Mis-assessed last cleanup pass as a generic, rarely-relevant safety net — it's not.
+            // This guards Qto0i2z, the SOUND engine's per-tick update: it loops bullet/shot events
+            // and looks up each shooter's player entity from the state's roster to pick the right
+            // shoot sound. On the custom server, a shot event can reference a shooter whose entity
+            // hasn't been (re)registered in that exact snapshot yet — far more likely here than
+            // against official's own timing — and the resulting uncaught exception aborts the rest
+            // of that frame's update chain, including the weapon-slot/HUD work scheduled after it.
+            // Confirmed live: removing this made the primary weapon not show up in a custom lobby.
+            name: '6a  undefined player crash guard',
+            from: 'var Q=n.Qa7phk3[p.Qxluan],f=hb.Qhkjwni.Qqg43ev().dataById[Q.Qslw9vf];',
+            to:   'var Q=n.Qa7phk3[p.Qxluan];if(void 0===Q)continue;var f=hb.Qhkjwni.Qqg43ev().dataById[Q.Qslw9vf];',
+        },
+        {
             name: '6b7 custom-mode: skip pitch + pitchOffset (production comparator)',
             from: 'Math.abs(e.Qcrzrpr-t.Qcrzrpr)>1e-4||Math.abs(e.Qd0yy90-t.Qd0yy90)>1e-4||',
             to:   '(!(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)&&(Math.abs(e.Qcrzrpr-t.Qcrzrpr)>1e-4||Math.abs(e.Qd0yy90-t.Qd0yy90)>1e-4))||',
