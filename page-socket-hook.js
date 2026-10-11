@@ -579,6 +579,44 @@
             from: 'n.copy(h.Qdsukt4).lerp(c.Qdsukt4,e.Qzh2kcz)',
             to:   'n.copy((h||c).Qdsukt4).lerp(c.Qdsukt4,e.Qzh2kcz)',
         },
+        {
+            // Restored. Neither 6a nor HB3 fixed the reported "primary weapon doesn't show up in
+            // a custom lobby" regression (confirmed live, both extension and VPS) — this is the
+            // actual cause. Removing these four entirely (rather than just gating them, which was
+            // already correct and stays) took away a real safety net against a runaway
+            // reconciliation failure: Qak2r7y (the reconciler) returns -1 ("Divergence check
+            // failed, no match for server state found locally") whenever it can't find a matching
+            // local snapshot for an echoed tick, and the fallback path (bundle :27354) is
+            // `this.Qgx464++` — UNBOUNDED growth with no cap. Once that starts,
+            // Qxo2o14[0].Q1o118x ("Global tick", built from Qgx464) drifts further from reality
+            // every tick, which makes EVERY subsequent reconcile attempt less likely to find a
+            // match too — a self-reinforcing spiral, not a one-off. Qak2r7y is also where weapon/
+            // recoil/ammo state gets rebuilt on a successful match
+            // (this.Qxo2o14[t].Qt03jhz.Qcvr9bt=...Qh23rk3.Q820rrc(e.body), see 6b8's own comment
+            // on why that matters) — once reconciliation stops succeeding at all, that state stops
+            // being restored too, consistent with getting stuck on whatever was equipped at the
+            // exact moment it broke (reported as "looks like sword-only, only melee shows up").
+            // Gated to custom mode only, same as before — this was never official play's problem,
+            // only ours.
+            name: '6d3 custom-mode: clamp incoming Q1o1c43 to ±3',
+            from: 'this.Qjdbmai=o.body,this.Q1o1c43=o.sync;',
+            to:   'this.Qjdbmai=o.body,this.Q1o1c43=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.max(-3,Math.min(3,o.sync)):o.sync;',
+        },
+        {
+            name: '6d4 custom-mode: clamp Q1o1c43 in loading path',
+            from: 'this.Q1o1c43=this.Qorty0h.length-1,this.Qobex5z',
+            to:   'this.Q1o1c43=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.min(this.Qorty0h.length-1,3):this.Qorty0h.length-1,this.Qobex5z',
+        },
+        {
+            name: 'K1  custom-mode: cap Qgx464 from server RTT delta to 3 ticks (150ms max)',
+            from: 's>=0&&(this.Qgx464=s)',
+            to:   's>=0&&(this.Qgx464=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.min(s,3):s)',
+        },
+        {
+            name: 'K2  custom-mode: cap Qgx464 no-state-increment to 3 ticks (150ms max)',
+            from: 'this.Qjdbmah=this.Qjdbmai,this.Qgx464++,this.Qjtawf1',
+            to:   'this.Qjdbmah=this.Qjdbmai,this.Qgx464=(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)?Math.min(this.Qgx464+1,3):this.Qgx464+1,this.Qjtawf1',
+        },
     ];
 
     function isBundle(v) { return typeof v === 'string' && v.indexOf('bundle.js') !== -1; }
