@@ -564,6 +564,21 @@
             from: "u.push({Q7q6byi:f+':'+p+':'+a,Q616y7o:0,Qxluan:p,Qtql1ud:l.clone(),Qsjaj00:v,",
             to:   "(window.__EVIO_EXT_SHOTRAY__&&window.__EVIO_EXT_SHOTRAY__(l,v,f+':'+p+':'+a)),u.push({Q7q6byi:f+':'+p+':'+a,Q616y7o:0,Qxluan:p,Qtql1ud:l.clone(),Qsjaj00:v,",
         },
+        {
+            // Also restored, same reasoning as 6a. This is the per-PEER health-bar/nameplate
+            // render step (confirmed against the real bundle: sets the nameplate sprite's
+            // .position, toggles its .visible by HP, draws its canvas text) — called once per
+            // peer inside a loop. If the previous-frame snapshot `h` is missing for one peer, the
+            // original code throws reading h.Qdsukt4, and an uncaught exception here aborts the
+            // REST of that per-frame loop for every peer processed after it in the same pass —
+            // plausibly including weapon-slot/model work for later entries. Confirmed live:
+            // restoring 6a alone did not fix "primary weapon doesn't show up"; this is the next
+            // most likely candidate by the same mechanism, and is a pure null-guard regardless —
+            // safe to have unconditionally, identical behavior whenever `h` is actually present.
+            name: 'HB3 health-bar: guard the position lerp against a missing previous frame',
+            from: 'n.copy(h.Qdsukt4).lerp(c.Qdsukt4,e.Qzh2kcz)',
+            to:   'n.copy((h||c).Qdsukt4).lerp(c.Qdsukt4,e.Qzh2kcz)',
+        },
     ];
 
     function isBundle(v) { return typeof v === 'string' && v.indexOf('bundle.js') !== -1; }
