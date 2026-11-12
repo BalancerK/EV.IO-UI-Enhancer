@@ -30107,6 +30107,8 @@ var EvioSim = (() => {
       _resetPickupState();
       match.round = 1;
       resetMatchTimer();
+      match.roundStartTick = 0;
+      resetSurvivalState();
       console.log("[evio-local] server state reset (sessions cleared, bots removed, entities/pickups/match reset)");
     }
     function maybeStopGameLoop() {
@@ -31183,6 +31185,7 @@ var EvioSim = (() => {
     // the object directly, because resetSurvivalState REPLACES survivalState wholesale (same
     // reasoning as getSessions()/getParityRings() above for other reassignable module state).
     tickSurvivalWaves,
+    survivalWaveNumber,
     tickSurvivalRevives,
     tickSurvivalBotRemoval,
     pickWeightedTier,

@@ -10687,6 +10687,15 @@ function startServer() {
     _resetPickupState();
     match.round = 1;
     resetMatchTimer();
+    // The caller (maybeStopGameLoop) just reset globalTick to 0 — match.roundStartTick and
+    // survival's own wave counter were NOT touched by anything above (resetMatchTimer only
+    // resets the ROUND timer/gameMode) and still point at whatever large tick they were at
+    // before the stop. The very next connection would then compute
+    // survivalWaveNumber(~0) against that stale, now-enormous roundStartTick — a hugely negative
+    // tick delta — showing both a negative wave number AND a negative "next wave" countdown on
+    // the same HUD line. Reset both here so they're consistent with the fresh globalTick=0.
+    match.roundStartTick = 0;
+    resetSurvivalState();
     console.log("[evio-local] server state reset (sessions cleared, bots removed, entities/pickups/match reset)");
   }
 
@@ -12104,6 +12113,7 @@ const serverExports = {
   // the object directly, because resetSurvivalState REPLACES survivalState wholesale (same
   // reasoning as getSessions()/getParityRings() above for other reassignable module state).
   tickSurvivalWaves,
+  survivalWaveNumber,
   tickSurvivalRevives,
   tickSurvivalBotRemoval,
   pickWeightedTier,
