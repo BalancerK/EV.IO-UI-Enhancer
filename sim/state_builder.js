@@ -360,9 +360,15 @@ function buildFirstSpawnBody(options = {}) {
     234, Array.isArray(options.cosmetics) ? options.cosmetics : [],
     235, options.clan ?? null,
     236, options.extraMeta ?? null,
-    237, false,
+    // 237 Qcvoys2 = isBot. Drives the client's own "{N} bots alive" count AND the survival
+    // scoreboard-hide rule (both read this per-entity flag directly, client-side — see the
+    // survival mode comment in local_ws_server.js's buildPeerBootstrapDelta). Was hardcoded
+    // false for every entity, bot or not, which is why neither ever worked.
+    237, !!options.isBot,
     238, 1,
-    239, false,
+    // 239 Qqw6dra = isBoss. Drives the "Kill the boss!" HUD text and the boss HP-bar overlay —
+    // also hardcoded false before.
+    239, !!options.isBoss,
     240, false,
     241, null,
     242, 0,
@@ -373,6 +379,11 @@ function buildFirstSpawnBody(options = {}) {
     // waiting/intermission phase that can leave the loading/lobby overlay up.
     280, gamePhase
   );
+  // Qpa5f8z (opcode 298) — the tick the current round started. Decoded AFTER the entity block
+  // (298 > 280 numerically, same ascending-scan rule as everything else), so it rides here, not
+  // inside the push() above. Survival's own HUD computes elapsed round time from this entirely
+  // client-side — see local_ws_server.js's match.roundStartTick comment for the full story.
+  body.push(298, Number.isFinite(options.roundStartTick) ? options.roundStartTick : 0);
 
   return body;
 }

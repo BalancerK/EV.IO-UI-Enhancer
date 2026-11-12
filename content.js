@@ -334,7 +334,8 @@ window.addEventListener('load', () => {
 /* Same reasoning as .ev-field-input above, plus: the native options POPUP always renders on a
    white background regardless of page theme, so the <option>s need their own explicit color
    even though the closed <select> itself is already covered by .ev-field-input. */
-#ev-host-public option {
+#ev-host-public option,
+.ev-qa-select option {
     color: #000;
     background: #fff;
 }
@@ -470,6 +471,16 @@ window.addEventListener('load', () => {
     padding: 5px 7px;
     font-size: 13px;
     text-align: right;
+}
+.ev-qa-select {
+    width: 130px;
+    box-sizing: border-box;
+    color: #000;
+    background: #fff;
+    border: 1px solid rgba(0,0,0,0.3);
+    border-radius: 6px;
+    padding: 5px 7px;
+    font-size: 13px;
 }
 .ev-qa-chips {
     display: flex;
@@ -786,7 +797,7 @@ window.addEventListener('load', () => {
     // min/max/step, reset) is still read live from /api/settings, same as the full dashboard —
     // only WHICH keys show up here is hardcoded.
     const QUICK_ADMIN_SETTING_KEYS = [
-        'roundTicks', 'damageScale', 'botDamageMult', 'botWeaponPickupsEnabled',
+        'gameMode', 'roundTicks', 'damageScale', 'botDamageMult', 'botWeaponPickupsEnabled',
         'botFriendlyFire', 'swordBotImpulseEnabled', 'swordBotGrenadesEnabled',
         'botCount', 'swordBotCount', 'botLevel', 'swordBotLevel',
         'gravity', 'throwableCooldownScale', 'teleportCooldownScale',
@@ -877,6 +888,17 @@ window.addEventListener('load', () => {
             input.type = 'checkbox';
             input.checked = !!s.value;
             input.addEventListener('change', () => commitSetting(s.key, input.checked));
+        } else if (s.type === 'enum' && Array.isArray(s.choices)) {
+            input = document.createElement('select');
+            input.className = 'ev-qa-select';
+            stopKeyPropagation(input);
+            s.choices.forEach((choice) => {
+                const o = document.createElement('option');
+                o.value = choice; o.textContent = choice;
+                if (choice === s.value) o.selected = true;
+                input.appendChild(o);
+            });
+            input.addEventListener('change', () => commitSetting(s.key, input.value));
         } else {
             input = document.createElement('input');
             input.type = 'number';

@@ -19771,12 +19771,18 @@ var EvioSim = (() => {
       options.clan ?? null,
       236,
       options.extraMeta ?? null,
+      // 237 Qcvoys2 = isBot. Drives the client's own "{N} bots alive" count AND the survival
+      // scoreboard-hide rule (both read this per-entity flag directly, client-side — see the
+      // survival mode comment in local_ws_server.js's buildPeerBootstrapDelta). Was hardcoded
+      // false for every entity, bot or not, which is why neither ever worked.
       237,
-      false,
+      !!options.isBot,
       238,
       1,
+      // 239 Qqw6dra = isBoss. Drives the "Kill the boss!" HUD text and the boss HP-bar overlay —
+      // also hardcoded false before.
       239,
-      false,
+      !!options.isBoss,
       240,
       false,
       241,
@@ -19791,6 +19797,7 @@ var EvioSim = (() => {
       280,
       gamePhase
     );
+    body.push(298, Number.isFinite(options.roundStartTick) ? options.roundStartTick : 0);
     return body;
   }
   function buildLoadoutDelta(options = {}) {
@@ -27917,6 +27924,7 @@ var EvioSim = (() => {
       appendPlayerTickBody(body, playerId, playerState);
     }
     body.push(280, ROUNDS_ENABLED ? match.gameMode : GAME_PHASE);
+    body.push(298, match.roundStartTick);
     if (match.teleporterUseTicks.length) body.push(308, match.teleporterUseTicks);
     return body;
   }
@@ -27950,6 +27958,12 @@ var EvioSim = (() => {
       emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
       gamePhase: GAME_PHASE,
       gameModeId: GAME_MODE,
+      roundStartTick: match.roundStartTick,
+      // 237/239 — see spawnBot's own isSurvivalBot/isBoss comment. A peer's bot/boss status is
+      // part of their identity, same tier as their weapon/clan, so it belongs in this one shared
+      // peer-introduction builder, not duplicated per call site.
+      isBot: !!peer.isBot,
+      isBoss: !!peer.isBoss,
       // Opcode 235 = clan insignia image. This was MISSING, which is why a player saw their OWN clan
       // logo but never a peer's: the avatar is a PROP (the ~3 roster covers every session) whereas
       // the clan image is a per-ENTITY opcode, and it was only ever filled in for the local player's
@@ -28207,6 +28221,13 @@ var EvioSim = (() => {
     gameMode: 0,
     // Qbu40n9: 0 playing, 1 game over (end-game scoreboard)
     round: 1,
+    // Qpa5f8z (opcode 298) — the tick the CURRENT round started at. Survival's own HUD (the
+    // "Wave {N} spawns in {time}"/"{N} bots alive" text under #roundCountdown) computes elapsed
+    // round time as Qwhlcfo-Qpa5f8z entirely client-side (Qmpb4uv, using the "survival" gamemode's
+    // own hardcoded wave-duration constants) — we never sent this opcode at all before, so that
+    // subtraction ran against whatever stale/zero value the client defaulted to, producing the
+    // "Wave -1990" nonsense a real capture showed. Reset in startNewRound.
+    roundStartTick: 0,
     // Qy1p5xf (opcode 8) — the map GENERATION id. The client reloads the map whenever this differs
     // from the value it last loaded (`Qrn6ykl: e => e.Qaol467.Qy1p5xf !== h`), and predictState
     // returns null until the load completes. Bump it to force a reload; never reuse a value.
@@ -28391,7 +28412,8 @@ var EvioSim = (() => {
     resetMatchTimer();
     respawnAll(sessions);
     for (const s2 of sessions.values()) if (s2) s2.survivalOut = false;
-    resetSurvivalState(_live.globalTick);
+    resetSurvivalState();
+    match.roundStartTick = _live.globalTick;
     clearAllEntities("round start");
     const changed = advanceMap();
     if (changed) {
@@ -28712,19 +28734,33 @@ var EvioSim = (() => {
     desc: `"deathmatch" (default, respawn-on-timer, PvP) or "survival" (co-op vs. escalating bot waves, no respawn, no PvP \u2014 see the other Survival settings for the wave curve). Switching modes mid-session takes effect on the NEXT round (startNewRound resets the wave clock and every player's out-state).`
   }, (v2) => {
     GAME_MODE = v2;
+    if (v2 === "survival") set("botDamageMult", 0.2, "survival-mode-default");
   });
   var SURVIVAL_WAVE_TICKS = define({
     key: "survivalWaveTicks",
     env: "EVIO_SURVIVAL_WAVE_TICKS",
     type: "int",
-    def: 600,
+    def: 500,
     min: 60,
     max: 12e3,
     category: "Survival",
     label: "Wave length (ticks)",
-    desc: "How long each wave lasts before the next one escalates bot count/level. 600 = 30s at 20Hz."
+    desc: "How long each wave lasts before the next one escalates bot count/level. 500 = 25s at 20Hz, matching official survival's own Qvkq32h constant."
   }, (v2) => {
     SURVIVAL_WAVE_TICKS = v2;
+  });
+  var SURVIVAL_START_DELAY_TICKS = define({
+    key: "survivalStartDelayTicks",
+    env: "EVIO_SURVIVAL_START_DELAY_TICKS",
+    type: "int",
+    def: 50,
+    min: 0,
+    max: 2e3,
+    category: "Survival",
+    label: "Delay before wave 1 (ticks)",
+    desc: `Grace period at round start with no bots yet \u2014 "Wave 0" on the HUD. 50 = 2.5s at 20Hz, matching official survival's own Qkd51bb constant.`
+  }, (v2) => {
+    SURVIVAL_START_DELAY_TICKS = v2;
   });
   var SURVIVAL_BASE_BOT_COUNT = define({
     key: "survivalBaseBotCount",
@@ -28805,31 +28841,34 @@ var EvioSim = (() => {
   }, (v2) => {
     SURVIVAL_BOSS_DAMAGE_RESIST = v2;
   });
-  var survivalState = { waveStartTick: 0, currentWave: -1, bossPlayerId: null };
-  function resetSurvivalState(tick) {
-    survivalState = { waveStartTick: tick, currentWave: -1, bossPlayerId: null };
+  var survivalState = { currentWave: -1, bossPlayerId: null };
+  function resetSurvivalState() {
+    survivalState = { currentWave: -1, bossPlayerId: null };
+  }
+  function survivalWaveNumber(tick) {
+    return Math.floor((tick - match.roundStartTick - SURVIVAL_START_DELAY_TICKS) / SURVIVAL_WAVE_TICKS);
   }
   function tickSurvivalWaves(sessions) {
     if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
     if (!_live.spawnBot) return;
-    const wave = Math.floor((_live.globalTick - survivalState.waveStartTick) / SURVIVAL_WAVE_TICKS);
+    const wave = survivalWaveNumber(_live.globalTick);
     if (wave <= survivalState.currentWave) return;
     survivalState.currentWave = wave;
     const survivalBots = () => _live.listBots().filter((b2) => b2.isSurvivalBot && !b2.isBoss);
-    const targetCount = Math.min(
+    const targetCount = wave < 1 ? 0 : Math.min(
       SURVIVAL_MAX_BOT_COUNT,
-      Math.floor(SURVIVAL_BASE_BOT_COUNT + wave * SURVIVAL_BOT_COUNT_PER_WAVE)
+      Math.floor(SURVIVAL_BASE_BOT_COUNT + (wave - 1) * SURVIVAL_BOT_COUNT_PER_WAVE)
     );
-    const targetLevel = Math.min(10, 5 + Math.floor(wave / SURVIVAL_LEVEL_UP_EVERY_N_WAVES));
+    const targetLevel = Math.min(10, 5 + Math.floor(Math.max(0, wave - 1) / SURVIVAL_LEVEL_UP_EVERY_N_WAVES));
     while (survivalBots().length < targetCount) {
-      _live.spawnBot({ level: targetLevel, isSurvivalBot: true });
+      _live.spawnBot({ level: targetLevel, isSurvivalBot: true, name: "Bot" });
     }
     const excess = survivalBots().length - targetCount;
     if (excess > 0) {
       for (const b2 of survivalBots().slice(targetCount)) _live.removeBot(b2.playerId);
     }
     for (const b2 of survivalBots()) b2.botLevel = targetLevel;
-    if (wave > 0 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
+    if (wave >= 1 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
       const bossAlive = survivalState.bossPlayerId && sessions.get(survivalState.bossPlayerId);
       if (!bossAlive) {
         const boss = _live.spawnBot({ level: 10, isSurvivalBot: true, isBoss: true, name: "BOSS" });
@@ -29440,6 +29479,9 @@ var EvioSim = (() => {
               emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
               gamePhase: ROUNDS_ENABLED ? match.gameMode : GAME_PHASE,
               gameModeId: GAME_MODE,
+              roundStartTick: match.roundStartTick,
+              isBot: !!s2.isBot,
+              isBoss: !!s2.isBoss,
               officialBootstrapFields: OFFICIAL_BOOTSTRAP_FIELDS,
               customMap: true,
               matchTimer: match.timer,
@@ -30267,6 +30309,7 @@ var EvioSim = (() => {
                 emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
                 gamePhase: GAME_PHASE,
                 gameModeId: GAME_MODE,
+                roundStartTick: match.roundStartTick,
                 // Optional passive-official structural parity fields. Disabled by
                 // default; enable with EVIO_OFFICIAL_BOOTSTRAP_FIELDS=1 for a
                 // one-variable experiment.

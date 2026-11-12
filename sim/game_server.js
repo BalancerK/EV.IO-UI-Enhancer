@@ -7787,6 +7787,12 @@ function buildTickBody(playerId, tick, playerState = createPlayerSimState(), pee
 
   // 280 goes last — after all 244 entity blocks, matching buildFirstSpawnBody.
   body.push(280, ROUNDS_ENABLED ? match.gameMode : GAME_PHASE);
+  // 298 Qpa5f8z — the tick the current round started. 298 > 280 numerically so it rides here, in
+  // the post-entity-loop ascending trailer, not the pre-loop header. Survival's own HUD ("Wave
+  // {N} spawns in {time}", "{N} bots alive") computes elapsed round time from this entirely
+  // client-side — see match.roundStartTick's own comment. Sent every tick (not bootstrap-only)
+  // so it's never stale even if a client missed the bootstrap packet somehow.
+  body.push(298, match.roundStartTick);
   // 308 Qi3xpyi — per-teleporter last-used tick, driving the client's portal burst effect. It
   // decodes AFTER the 244 player loop (bundle :66224 vs :65808), so unlike the rest of the world
   // state it cannot ride in the header: the client's single ascending scan would stall on it and
@@ -7829,6 +7835,12 @@ function buildPeerBootstrapDelta(peer) {
     emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
     gamePhase: GAME_PHASE,
     gameModeId: GAME_MODE,
+    roundStartTick: match.roundStartTick,
+    // 237/239 — see spawnBot's own isSurvivalBot/isBoss comment. A peer's bot/boss status is
+    // part of their identity, same tier as their weapon/clan, so it belongs in this one shared
+    // peer-introduction builder, not duplicated per call site.
+    isBot: !!peer.isBot,
+    isBoss: !!peer.isBoss,
     // Opcode 235 = clan insignia image. This was MISSING, which is why a player saw their OWN clan
     // logo but never a peer's: the avatar is a PROP (the ~3 roster covers every session) whereas
     // the clan image is a per-ENTITY opcode, and it was only ever filled in for the local player's
@@ -8191,6 +8203,13 @@ const match = {
   timer: 0,        // Qpm8qez: ticks remaining; goes NEGATIVE through the intermission
   gameMode: 0,     // Qbu40n9: 0 playing, 1 game over (end-game scoreboard)
   round: 1,
+  // Qpa5f8z (opcode 298) — the tick the CURRENT round started at. Survival's own HUD (the
+  // "Wave {N} spawns in {time}"/"{N} bots alive" text under #roundCountdown) computes elapsed
+  // round time as Qwhlcfo-Qpa5f8z entirely client-side (Qmpb4uv, using the "survival" gamemode's
+  // own hardcoded wave-duration constants) — we never sent this opcode at all before, so that
+  // subtraction ran against whatever stale/zero value the client defaulted to, producing the
+  // "Wave -1990" nonsense a real capture showed. Reset in startNewRound.
+  roundStartTick: 0,
   // Qy1p5xf (opcode 8) — the map GENERATION id. The client reloads the map whenever this differs
   // from the value it last loaded (`Qrn6ykl: e => e.Qaol467.Qy1p5xf !== h`), and predictState
   // returns null until the load completes. Bump it to force a reload; never reuse a value.
@@ -8445,10 +8464,11 @@ function startNewRound(sessions) {
   // run regardless of how the last one ended (timer or wipe). Harmless no-op in deathmatch
   // (survivalOut is never set there, and the wave scheduler's own guard skips entirely).
   for (const s of sessions.values()) if (s) s.survivalOut = false;
-  // _live.globalTick, not the bare `globalTick` closure variable — startNewRound is a
-  // module-level function, outside startServer's closure that owns that variable (same reason
-  // tickSurvivalWaves below reads it off _live too).
-  resetSurvivalState(_live.globalTick);
+  resetSurvivalState();
+  // Qpa5f8z (opcode 298) — _live.globalTick, not the bare `globalTick` closure variable;
+  // startNewRound is a module-level function, outside startServer's closure that owns that
+  // variable (same reason tickSurvivalWaves/survivalWaveNumber read it off _live too).
+  match.roundStartTick = _live.globalTick;
   // Nothing cleared thrown entities at a round boundary, so a mine or trip mine planted in round 1
   // was still armed and still killing people in round 2 — and after a map change it sat at
   // coordinates that no longer meant anything. A round is a fresh start for scores and positions; it
@@ -8859,13 +8879,37 @@ let GAME_MODE = S.define({
       + "bot waves, no respawn, no PvP — see the other Survival settings for the wave curve). "
       + "Switching modes mid-session takes effect on the NEXT round (startNewRound resets the "
       + "wave clock and every player's out-state).",
-}, (v) => { GAME_MODE = v; });
+}, (v) => {
+  GAME_MODE = v;
+  // Entering survival resets bot damage to a gentler default than deathmatch's 1.0 — a lobby full
+  // of escalating-count bots hits MUCH harder in aggregate than one deathmatch opponent, so the
+  // same per-bot multiplier that's fine for a 1v1 would be brutal at wave 6's bot count. A host can
+  // still override it afterward via quick admin; this only sets it the moment survival is chosen,
+  // same as any other mode "preset" would.
+  if (v === "survival") S.set("botDamageMult", 0.2, "survival-mode-default");
+});
 
+// Qvkq32h/Qkd51bb below are the REAL numbers from the official bundle's own "survival" gamemode
+// config (confirmed by reading the actual client bundle — a static object keyed by gameModeId,
+// baked into the client, never sent over the wire): wave duration 25s, 2.5s initial delay before
+// wave 1. Matching them means our OWN bot-escalation pacing lines up with the "Wave {N} spawns in
+// {time}" text the official client computes and renders ENTIRELY ON ITS OWN from opcode 298
+// (match.roundStartTick) + its own hardcoded constants — we don't send that text or those
+// constants at all, so getting OUR escalation schedule to agree with the CLIENT's independent
+// display is the only way the HUD and the actual bot spawns stay in sync.
 let SURVIVAL_WAVE_TICKS = S.define({
-  key: "survivalWaveTicks", env: "EVIO_SURVIVAL_WAVE_TICKS", type: "int", def: 600, min: 60, max: 12000,
+  key: "survivalWaveTicks", env: "EVIO_SURVIVAL_WAVE_TICKS", type: "int", def: 500, min: 60, max: 12000,
   category: "Survival", label: "Wave length (ticks)",
-  desc: "How long each wave lasts before the next one escalates bot count/level. 600 = 30s at 20Hz.",
+  desc: "How long each wave lasts before the next one escalates bot count/level. 500 = 25s at "
+      + "20Hz, matching official survival's own Qvkq32h constant.",
 }, (v) => { SURVIVAL_WAVE_TICKS = v; });
+
+let SURVIVAL_START_DELAY_TICKS = S.define({
+  key: "survivalStartDelayTicks", env: "EVIO_SURVIVAL_START_DELAY_TICKS", type: "int", def: 50, min: 0, max: 2000,
+  category: "Survival", label: "Delay before wave 1 (ticks)",
+  desc: "Grace period at round start with no bots yet — \"Wave 0\" on the HUD. 50 = 2.5s at 20Hz, "
+      + "matching official survival's own Qkd51bb constant.",
+}, (v) => { SURVIVAL_START_DELAY_TICKS = v; });
 
 let SURVIVAL_BASE_BOT_COUNT = S.define({
   key: "survivalBaseBotCount", env: "EVIO_SURVIVAL_BASE_BOT_COUNT", type: "int", def: 2, min: 0, max: 24,
@@ -8914,10 +8958,23 @@ let SURVIVAL_BOSS_DAMAGE_RESIST = S.define({
 // reconcileBotCount if an admin touches botCount while hosting survival. Survival keeps its own
 // bot pool instead, spawned/removed directly via the same _live.spawnBot/listBots/removeBot
 // reconcileBotCount itself uses — just filtered to bots THIS system spawned (isSurvivalBot).
-let survivalState = { waveStartTick: 0, currentWave: -1, bossPlayerId: null };
+// No waveStartTick of its own — match.roundStartTick (opcode 298) IS that anchor, the same one
+// the client's own wave-number formula uses, so our escalation and the client's independently-
+// computed HUD text can never drift apart.
+let survivalState = { currentWave: -1, bossPlayerId: null };
 
-function resetSurvivalState(tick) {
-  survivalState = { waveStartTick: tick, currentWave: -1, bossPlayerId: null };
+function resetSurvivalState() {
+  survivalState = { currentWave: -1, bossPlayerId: null };
+}
+
+// Official survival's own wave-number formula (confirmed from the real client bundle, Qmpb4uv):
+//   floor((elapsed - delayTicks) / waveTicks)   — then the HUD adds 1 to DISPLAY it ("Wave 1").
+// Negative while still inside the initial delay (displays as "Wave 0" — a deliberate grace
+// period, not a bug; see SURVIVAL_START_DELAY_TICKS). Exported standalone so the HUD-facing wave
+// number and the bot-escalation curve below always agree — there is exactly one formula, not two
+// that happen to match.
+function survivalWaveNumber(tick) {
+  return Math.floor((tick - match.roundStartTick - SURVIVAL_START_DELAY_TICKS) / SURVIVAL_WAVE_TICKS);
 }
 
 // Called once per global tick (see runGlobalTickInner) while gameMode is "survival" and the
@@ -8927,19 +8984,24 @@ function tickSurvivalWaves(sessions) {
   if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
   if (!_live.spawnBot) return;
 
-  const wave = Math.floor((_live.globalTick - survivalState.waveStartTick) / SURVIVAL_WAVE_TICKS);
+  const wave = survivalWaveNumber(_live.globalTick);
   if (wave <= survivalState.currentWave) return;
   survivalState.currentWave = wave;
 
   const survivalBots = () => _live.listBots().filter((b) => b.isSurvivalBot && !b.isBoss);
-  const targetCount = Math.min(
+  // Wave < 1 is the initial delay ("Wave 0" on the HUD) — no bots yet, matching the official
+  // client's own "0 bots alive" at the very start of a survival round.
+  const targetCount = wave < 1 ? 0 : Math.min(
     SURVIVAL_MAX_BOT_COUNT,
-    Math.floor(SURVIVAL_BASE_BOT_COUNT + wave * SURVIVAL_BOT_COUNT_PER_WAVE),
+    Math.floor(SURVIVAL_BASE_BOT_COUNT + (wave - 1) * SURVIVAL_BOT_COUNT_PER_WAVE),
   );
-  const targetLevel = Math.min(10, 5 + Math.floor(wave / SURVIVAL_LEVEL_UP_EVERY_N_WAVES));
+  const targetLevel = Math.min(10, 5 + Math.floor(Math.max(0, wave - 1) / SURVIVAL_LEVEL_UP_EVERY_N_WAVES));
 
   while (survivalBots().length < targetCount) {
-    _live.spawnBot({ level: targetLevel, isSurvivalBot: true });
+    // No flavor names in survival — these are faceless wave fodder, not deathmatch's named bots,
+    // and the official client hides them from the scoreboard/kill feed entirely anyway once
+    // opcode 237 (isBot) marks them (see buildPeerBootstrapDelta) — a name would never be seen.
+    _live.spawnBot({ level: targetLevel, isSurvivalBot: true, name: "Bot" });
   }
   const excess = survivalBots().length - targetCount;
   if (excess > 0) {
@@ -8950,7 +9012,7 @@ function tickSurvivalWaves(sessions) {
   // newly-spawned ones.
   for (const b of survivalBots()) b.botLevel = targetLevel;
 
-  if (wave > 0 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
+  if (wave >= 1 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
     const bossAlive = survivalState.bossPlayerId && sessions.get(survivalState.bossPlayerId);
     if (!bossAlive) {
       const boss = _live.spawnBot({ level: 10, isSurvivalBot: true, isBoss: true, name: "BOSS" });
@@ -9798,6 +9860,9 @@ function startServer() {
           emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
           gamePhase: ROUNDS_ENABLED ? match.gameMode : GAME_PHASE,
           gameModeId: GAME_MODE,
+          roundStartTick: match.roundStartTick,
+          isBot: !!s.isBot,
+          isBoss: !!s.isBoss,
           officialBootstrapFields: OFFICIAL_BOOTSTRAP_FIELDS,
           customMap: true,
           matchTimer: match.timer,
@@ -10965,6 +11030,7 @@ function startServer() {
               emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
               gamePhase: GAME_PHASE,
               gameModeId: GAME_MODE,
+              roundStartTick: match.roundStartTick,
               // Optional passive-official structural parity fields. Disabled by
               // default; enable with EVIO_OFFICIAL_BOOTSTRAP_FIELDS=1 for a
               // one-variable experiment.
