@@ -9213,6 +9213,11 @@ let SURVIVAL_ARMOR_KIT_AMOUNT = S.define({
 let _survivalLastItemSpawnTick = 0;
 
 function spawnSurvivalItem() {
+  // DISABLED — see tickSurvivalItems' own comment. Guarded here too (not just at the tick
+  // caller) so nothing — including a future call site, a test, or an admin-dashboard button —
+  // can accidentally stream one of these broken entities to a connected client.
+  return;
+  // eslint-disable-next-line no-unreachable
   const pts = bpw.pickupPoints || [];
   if (!pts.length) return;
   const pt = pts[Math.floor(Math.random() * pts.length)];
@@ -9237,6 +9242,18 @@ function spawnSurvivalItem() {
 // Periodic spawn + proximity pickup for health/armor kits. A no-op outside survival, same
 // pattern as every other survival-only tick function.
 function tickSurvivalItems(sessions) {
+  // DISABLED — confirmed LIVE-BREAKING, not just unverified: the real client's own grenade
+  // renderer (Qhezul1) does `dataById[entity.type].gravity` with NO guard on the lookup failing,
+  // and our invented type ids (9001/9002, picked specifically to avoid colliding with a real
+  // grenade type) aren't in that table at all, so dataById[...] is undefined and the client
+  // crashes solid ("Cannot read properties of undefined (reading 'gravity')") the instant one of
+  // these spawns. "Picked up a Health Kit"/"Picked up Armor" ARE real client-side toast strings,
+  // but they're reached through a mechanism this project hasn't identified yet — definitely not
+  // the activeEntities/dataById path grenades use. Keeping the proximity-pickup/heal logic below
+  // intact (harmless, never runs while spawning is off) so re-enabling is a one-line fix once the
+  // real wire mechanism is found — see spawnSurvivalItem's own comment.
+  return;
+  // eslint-disable-next-line no-unreachable
   if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
   const tick = _live.globalTick || 0;
   let liveItemCount = 0;

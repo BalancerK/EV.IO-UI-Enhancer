@@ -29117,6 +29117,7 @@ var EvioSim = (() => {
   });
   var _survivalLastItemSpawnTick = 0;
   function spawnSurvivalItem() {
+    return;
     const pts = physics_world_default.pickupPoints || [];
     if (!pts.length) return;
     const pt2 = pts[Math.floor(Math.random() * pts.length)];
@@ -29142,6 +29143,7 @@ var EvioSim = (() => {
     });
   }
   function tickSurvivalItems(sessions) {
+    return;
     if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
     const tick = _live.globalTick || 0;
     let liveItemCount = 0;
