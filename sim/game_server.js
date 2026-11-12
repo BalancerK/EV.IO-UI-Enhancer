@@ -5712,6 +5712,23 @@ function tickSurvivalRevives(sessions) {
       tp.deathStateTimer = 0;
       tp.healthPoints = SURVIVAL_REVIVE_HEAL;
       tp.armorPoints = 0;
+      tp.fireCooldown = 0;
+      tp.ticksSinceDamage = 99999; tp.ticksSinceKill = 99999; tp.forceRegen = false;
+      if (tp._damagedBy) tp._damagedBy.clear();
+      // Come back on the PRIMARY + sword, same as a normal respawn — not whatever was in hand
+      // (possibly a pickup weapon, possibly empty) at the moment they went down. A pickup weapon
+      // never survives death in deathmatch either; this is that same rule for a revive.
+      _clearAllPickupWeapons(tp);
+      if (!SWORD_ONLY && Array.isArray(tp.weaponList) && tp.weaponList.length
+          && Number.isFinite(tp.weaponList[0]) && tp.weaponList[0] !== SWORD_WEAPON_ID
+          && tp.equippedWeaponId !== tp.weaponList[0]) {
+        tp.backupWeaponId = tp.equippedWeaponId;
+        tp.equippedWeaponId = tp.weaponList[0];
+        tp._ammoGunId = tp.weaponList[0];
+        tp.weaponSendCount = WEAPON_SEND_REPEAT_TICKS;
+        startWeaponSwitch(tp);
+      }
+      tp.gunAmmo = weaponClip(tp._ammoGunId, tp); tp.reloadTicks = 0;
       console.log(`[evio-local] survival: ${s.displayName} revived ${target.displayName}`);
     }
     p.healthPoints = Math.min(1, p.healthPoints + SURVIVAL_REVIVER_HEAL_REWARD);
@@ -5850,6 +5867,9 @@ function createPlayerSimState(spawn = {}, sessionId = null) {
     // See tickSurvivalRevives — meaningless/always -1,0 outside survival.
     reviveTargetId: -1,
     reviveHoldTicks: 0,
+    // Player model scale (opcode 155/156, Qcqglqd/Qte59p5). 1 = normal size; set >1 for
+    // survival's boss. See SURVIVAL_BOSS_SCALE's own comment.
+    modelScale: 1,
     fireCooldown: 0,        // ticks until the weapon can fire again
     spawnSeed: 0,           // which spawn point this player last used (cycles on respawn)
     position: {
@@ -7588,6 +7608,9 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       149, Number.isFinite(playerState.jumpTick) ? playerState.jumpTick : 9999,
       150, 9999,
       151, playerState.slideBoostTick || 0,
+      // 155/156 Qcqglqd/Qte59p5 — player model scale. See SURVIVAL_BOSS_SCALE's own comment.
+      155, Number.isFinite(playerState.modelScale) ? playerState.modelScale : 1,
+      156, Number.isFinite(playerState.modelScale) ? playerState.modelScale : 1,
       157, playerState.airJumps,
       158, Math.max(0, Math.min(1, Number.isFinite(playerState.stamina) ? playerState.stamina : 1)),
       // 159-165: the seven ability timers (Qctsdxg..a). Echoed every tick so each ability's HUD
@@ -7960,6 +7983,8 @@ function buildPeerBootstrapDelta(peer) {
     // 238 — see state_builder.js's own comment on the dual bot-level/boss-reward meaning.
     botLevel: peer.botLevel,
     bossReward: SURVIVAL_BOSS_REWARD,
+    // 155/156 — see SURVIVAL_BOSS_SCALE's own comment.
+    modelScale: peer.playerState ? peer.playerState.modelScale : 1,
     // Opcode 235 = clan insignia image. This was MISSING, which is why a player saw their OWN clan
     // logo but never a peer's: the avatar is a PROP (the ~3 roster covers every session) whereas
     // the clan image is a per-ENTITY opcode, and it was only ever filled in for the local player's
@@ -8922,7 +8947,10 @@ function reconcileBotCount() {
   if (!_live.spawnBot) return;
   // Only the plain gun-bot pool — sword bots are a SEPARATE count (reconcileSwordBotCount), each
   // reconciler must only ever spawn/remove from its own kind or the two counts fight each other.
-  const liveBots = () => _live.listBots().filter((b) => !b.isSwordBot);
+  // Survival bots (gun or melee) are EXCLUDED here too — they're tickSurvivalWaves' own pool,
+  // not this deathmatch one (see spawnBot's isSurvivalBot comment); without this, a survival
+  // melee bot's isSwordBot=true would get silently culled by whichever reconciler runs next.
+  const liveBots = () => _live.listBots().filter((b) => !b.isSwordBot && !b.isSurvivalBot);
   while (liveBots().length < BOT_COUNT) _live.spawnBot({ level: BOT_LEVEL });
   const excess = liveBots().length - BOT_COUNT;
   if (excess > 0) {
@@ -8937,7 +8965,7 @@ function reconcileBotCount() {
 // OWN difficulty level (SWORD_BOT_LEVEL), independent of the plain gun-bot pool's BOT_LEVEL.
 function reconcileSwordBotCount() {
   if (!_live.spawnBot) return;
-  const liveBots = () => _live.listBots().filter((b) => b.isSwordBot);
+  const liveBots = () => _live.listBots().filter((b) => b.isSwordBot && !b.isSurvivalBot);
   while (liveBots().length < SWORD_BOT_COUNT) _live.spawnBot({ level: SWORD_BOT_LEVEL, swordOnly: true });
   const excess = liveBots().length - SWORD_BOT_COUNT;
   if (excess > 0) {
@@ -9083,6 +9111,37 @@ let SURVIVAL_BOSS_REWARD = S.define({
       + "currency/wallet system of its own, so nothing is actually granted; it's purely the "
       + "chat-announcement number the real client expects to see.",
 }, (v) => { SURVIVAL_BOSS_REWARD = v; });
+
+let SURVIVAL_BOSS_SCALE = S.define({
+  key: "survivalBossScale", env: "EVIO_SURVIVAL_BOSS_SCALE", type: "number", def: 1.3, min: 1, max: 3, step: 0.05,
+  category: "Survival", label: "Boss model scale",
+  desc: "Confirmed real: the gamemode config ships a \"bossScale\" constant (default 1, Qxbns7f "
+      + "schema), sent to the client per-entity as opcode 155/156 (Qcqglqd/Qte59p5). Official's "
+      + "default is 1, meaning the LIVE value the user actually sees is a runtime override we "
+      + "can't read from the static bundle — 1.3 is our own reasonable \"slightly bigger\" guess.",
+}, (v) => { SURVIVAL_BOSS_SCALE = v; });
+
+// Random cosmetic variety for the boss — two REAL, bundle-confirmed skin/thumb pairs (not
+// invented ids, unlike the item-pickup mistake — see tickSurvivalItems' own comment on why that
+// matters). A proper "boss skin" might exist in the live CMS catalogue we don't have access to;
+// these are what the client bundle itself references as literal strings.
+const SURVIVAL_BOSS_SKINS = [
+  { skinUrl: "https://ev.io/sites/default/files/skins/bot_2.evskin",
+    thumbUrl: "https://ev.io/sites/default/files/skin_profile_thumbs/botred110x110.png" },
+  { skinUrl: "https://ev.io/sites/default/files/skins/zombiebot_0.evskin",
+    thumbUrl: "https://ev.io/sites/default/files/skin_profile_thumbs/zombiebot_head_0.png" },
+];
+const SURVIVAL_BOSS_NAMES = [
+  "Behemoth", "Warlord", "Colossus", "Juggernaut", "Devourer", "Ravager", "Titan", "Warbringer",
+];
+
+let SURVIVAL_MELEE_BOT_RATIO = S.define({
+  key: "survivalMeleeBotRatio", env: "EVIO_SURVIVAL_MELEE_BOT_RATIO", type: "number", def: 0.25, min: 0, max: 1, step: 0.05,
+  category: "Survival", label: "Melee bot ratio",
+  desc: "Fraction of each newly-spawned survival bot that comes in sword-only instead of "
+      + "gun+sword — confirmed official survival has a distinct melee bot archetype; the exact "
+      + "spawn ratio isn't reverse-engineered from the bundle, this is our own reasonable choice.",
+}, (v) => { SURVIVAL_MELEE_BOT_RATIO = v; });
 
 // ── Survival revive ──────────────────────────────────────────────────────────────────────────
 // Confirmed from the real client bundle: a downed (health<=0) teammate isn't instantly and
@@ -9359,7 +9418,11 @@ function tickSurvivalWaves(sessions) {
     // No flavor names in survival — these are faceless wave fodder, not deathmatch's named bots,
     // and the official client hides them from the scoreboard/kill feed entirely anyway once
     // opcode 237 (isBot) marks them (see buildPeerBootstrapDelta) — a name would never be seen.
-    _live.spawnBot({ level: targetLevel, isSurvivalBot: true, name: "Bot" });
+    // A fraction of the pool are melee bots (sword-only, like deathmatch's sword-only mode, but
+    // with Teleport capped at 1 charge instead of 5 — see SURVIVAL_MELEE_BOT_ABILITY_SEED's own
+    // comment) rather than the default gun+sword loadout.
+    const meleeBot = Math.random() < SURVIVAL_MELEE_BOT_RATIO;
+    _live.spawnBot({ level: targetLevel, isSurvivalBot: true, name: "Bot", meleeBot });
   }
   const excess = survivalBots().length - targetCount;
   if (excess > 0) {
@@ -9377,8 +9440,16 @@ function tickSurvivalWaves(sessions) {
   // separate "end of special wave" bookkeeping needed.
   survivalState.activeSpecialWave = (wave >= 1 && Math.random() < SURVIVAL_SPECIAL_WAVE_CHANCE)
     ? pickSpecialWaveType() : null;
-  const forcedWeaponId = (survivalState.activeSpecialWave && survivalState.activeSpecialWave.weaponId) || 4;
-  for (const b of survivalBots()) _forceSurvivalBotWeapon(b, forcedWeaponId);
+  // A melee bot's OWN default is the sword, not the gun — reverting it to a flat weaponId 4
+  // whenever no special wave is active would silently strip its melee loadout every wave. Only
+  // an ACTIVE weapon-forcing special wave (Rocket/Grenade) overrides a melee bot's sword too,
+  // matching "force-equip the bots" applying to every bot, melee or not.
+  for (const b of survivalBots()) {
+    const defaultWeapon = b.isSwordBot ? SWORD_WEAPON_ID : 4;
+    const forcedWeaponId = (survivalState.activeSpecialWave && survivalState.activeSpecialWave.weaponId)
+      || defaultWeapon;
+    _forceSurvivalBotWeapon(b, forcedWeaponId);
+  }
   if (survivalState.activeSpecialWave) {
     console.log(`[evio-local] survival: wave ${wave} special wave — ${survivalState.activeSpecialWave.name}`);
   }
@@ -9386,7 +9457,15 @@ function tickSurvivalWaves(sessions) {
   if (wave >= 1 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
     const bossAlive = survivalState.bossPlayerId && sessions.get(survivalState.bossPlayerId);
     if (!bossAlive) {
-      const boss = _live.spawnBot({ level: 10, isSurvivalBot: true, isBoss: true, name: "BOSS" });
+      // Random name + skin per boss spawn, matching the "slightly bigger" look confirmed from
+      // the real client's own bossScale gamemode constant — see spawnBot's own comment for how
+      // these three opts get applied.
+      const bossName = SURVIVAL_BOSS_NAMES[Math.floor(Math.random() * SURVIVAL_BOSS_NAMES.length)];
+      const bossSkin = SURVIVAL_BOSS_SKINS[Math.floor(Math.random() * SURVIVAL_BOSS_SKINS.length)];
+      const boss = _live.spawnBot({
+        level: 10, isSurvivalBot: true, isBoss: true, name: bossName,
+        skinUrl: bossSkin.skinUrl, thumbUrl: bossSkin.thumbUrl, modelScale: SURVIVAL_BOSS_SCALE,
+      });
       survivalState.bossPlayerId = boss.playerId;
       console.log(`[evio-local] survival: wave ${wave} boss spawned (${boss.playerId})`);
     }
@@ -10240,6 +10319,7 @@ function startServer() {
           isBoss: !!s.isBoss,
           botLevel: s.botLevel,
           bossReward: SURVIVAL_BOSS_REWARD,
+          modelScale: s.playerState ? s.playerState.modelScale : 1,
           officialBootstrapFields: OFFICIAL_BOOTSTRAP_FIELDS,
           customMap: true,
           matchTimer: match.timer,
@@ -10708,6 +10788,12 @@ function startServer() {
     0,   // 15 Trip Mine
     1,   // 16 Impulse Grenade (level 1 = 2 charges)
   ];
+  // Survival's melee bot archetype: identical to the sword bot above (sword only, same
+  // jump/sprint/grenade loadout) except Teleport — 1 charge instead of 5, per the user's
+  // "only 1 tp [teleport]" callout — so these bots can close one gap but can't kite with
+  // repeated blinks the way a full sword bot can.
+  const SURVIVAL_MELEE_BOT_ABILITY_SEED = SWORD_BOT_ABILITY_SEED.slice();
+  SURVIVAL_MELEE_BOT_ABILITY_SEED[0] = 1;   // Teleport level 1 = 1 charge
 
   function spawnBot(opts = {}) {
     const spawnPoints = activeSpawnPoints();
@@ -10731,7 +10817,7 @@ function startServer() {
     // A sword bot ALWAYS carries the sword and nothing else — opts.weaponId is ignored for it, the
     // same way SWORD_ONLY overrides everyone's loadout server-wide (this is just that override
     // applied to one bot instead of the whole lobby).
-    const weaponId = opts.swordOnly ? SWORD_WEAPON_ID
+    const weaponId = (opts.swordOnly || opts.meleeBot) ? SWORD_WEAPON_ID
       : (Number.isFinite(opts.weaponId) ? opts.weaponId : (SWORD_ONLY ? SWORD_WEAPON_ID : 4));
     // Mirrors the real join's weapon-equip block (see the join handler) — createPlayerSimState
     // itself sets none of this, so a bot skipping it would carry no weapon at all.
@@ -10746,19 +10832,27 @@ function startServer() {
     // Mirrors the real join's ability-loadout block (see "applied loadout stats" in the join
     // handler): computes real weaponStats from the seed so the bot's jump/sprint (and, for a sword
     // bot, Teleport/Impulse) are ACTUALLY functional, not just cosmetically labelled as such.
-    const abilitySeed = _sanitizeAbilitySeed(opts.swordOnly ? SWORD_BOT_ABILITY_SEED : BOT_ABILITY_SEED);
+    const abilitySeed = _sanitizeAbilitySeed(
+      opts.swordOnly ? SWORD_BOT_ABILITY_SEED
+        : opts.meleeBot ? SURVIVAL_MELEE_BOT_ABILITY_SEED
+        : BOT_ABILITY_SEED);
     if (playerState._ps && playerState._ps.Qz8l93a) {
       Object.assign(playerState._ps.Qz8l93a, computeWeaponStats(abilitySeed));
       refreshMagazineCapacity(playerState);
       playerState._ps.weaponStateArray = abilitySeed;
     }
+    // Opcode 155/156 — see SURVIVAL_BOSS_SCALE's own comment. Only the boss gets a non-default
+    // scale; every other bot stays the createPlayerSimState default of 1.
+    if (Number.isFinite(opts.modelScale)) playerState.modelScale = opts.modelScale;
 
     const session = {
       ws: null,
       isBot: true,
       // Drives which combat branch driveBotFrame uses (_swordCombatFrame vs the plant-and-shoot gun
-      // branch) and which reconciler (reconcileBotCount vs reconcileSwordBotCount) owns this bot.
-      isSwordBot: !!opts.swordOnly,
+      // branch) and which reconciler (reconcileBotCount vs reconcileSwordBotCount) owns this bot —
+      // both reconcilers now exclude isSurvivalBot, so this is safe to set for a survival melee
+      // bot too (it needs the sword AI branch exactly like a deathmatch sword bot does).
+      isSwordBot: !!(opts.swordOnly || opts.meleeBot),
       // Owned by tickSurvivalWaves' own pool, separate from the deathmatch botCount/
       // swordBotCount pools reconcileBotCount/reconcileSwordBotCount manage — see that
       // function's own comment for why this doesn't go through the settings layer.
@@ -10782,8 +10876,8 @@ function startServer() {
       uid: -1000 - _botSeq,
       weaponId,
       skinTargetId: null,
-      skinUrl: BOT_SKIN_URL,
-      thumbUrl: BOT_THUMB_URL,
+      skinUrl: opts.skinUrl || BOT_SKIN_URL,
+      thumbUrl: opts.thumbUrl || BOT_THUMB_URL,
       skinRarity: null,
       clanImgUrl: null,
       clanLink: null,

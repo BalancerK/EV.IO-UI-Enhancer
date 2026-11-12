@@ -270,8 +270,13 @@ function buildFirstSpawnBody(options = {}) {
     150, 9999,
     151, -99999,
     152, -9999,
-    155, 1,
-    156, 1,
+    // 155 Qcqglqd / 156 Qte59p5 — player model scale (render + "confirmed fits" collision-check
+    // target, synced to the same value since we never need the client's own gradual grow/shrink
+    // transition). Confirmed from the real client bundle (w.scale.set(entity.Qcqglqd,...)).
+    // Survival's boss is "slightly bigger" (the gamemode config even ships a bossScale constant,
+    // default 1, meaning official leaves it bigger than that at runtime) — everyone else stays 1.
+    155, Number.isFinite(options.modelScale) ? options.modelScale : 1,
+    156, Number.isFinite(options.modelScale) ? options.modelScale : 1,
     157, 0,
     158, baseStamina,
     159, baseStamina / 4,

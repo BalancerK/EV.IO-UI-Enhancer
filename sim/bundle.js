@@ -19613,10 +19613,15 @@ var EvioSim = (() => {
       -99999,
       152,
       -9999,
+      // 155 Qcqglqd / 156 Qte59p5 — player model scale (render + "confirmed fits" collision-check
+      // target, synced to the same value since we never need the client's own gradual grow/shrink
+      // transition). Confirmed from the real client bundle (w.scale.set(entity.Qcqglqd,...)).
+      // Survival's boss is "slightly bigger" (the gamemode config even ships a bossScale constant,
+      // default 1, meaning official leaves it bigger than that at runtime) — everyone else stays 1.
       155,
-      1,
+      Number.isFinite(options.modelScale) ? options.modelScale : 1,
       156,
-      1,
+      Number.isFinite(options.modelScale) ? options.modelScale : 1,
       157,
       0,
       158,
@@ -26647,6 +26652,21 @@ var EvioSim = (() => {
         tp2.deathStateTimer = 0;
         tp2.healthPoints = SURVIVAL_REVIVE_HEAL;
         tp2.armorPoints = 0;
+        tp2.fireCooldown = 0;
+        tp2.ticksSinceDamage = 99999;
+        tp2.ticksSinceKill = 99999;
+        tp2.forceRegen = false;
+        if (tp2._damagedBy) tp2._damagedBy.clear();
+        _clearAllPickupWeapons(tp2);
+        if (!SWORD_ONLY && Array.isArray(tp2.weaponList) && tp2.weaponList.length && Number.isFinite(tp2.weaponList[0]) && tp2.weaponList[0] !== SWORD_WEAPON_ID2 && tp2.equippedWeaponId !== tp2.weaponList[0]) {
+          tp2.backupWeaponId = tp2.equippedWeaponId;
+          tp2.equippedWeaponId = tp2.weaponList[0];
+          tp2._ammoGunId = tp2.weaponList[0];
+          tp2.weaponSendCount = WEAPON_SEND_REPEAT_TICKS;
+          startWeaponSwitch(tp2);
+        }
+        tp2.gunAmmo = weaponClip(tp2._ammoGunId, tp2);
+        tp2.reloadTicks = 0;
         console.log(`[evio-local] survival: ${s2.displayName} revived ${target.displayName}`);
       }
       p2.healthPoints = Math.min(1, p2.healthPoints + SURVIVAL_REVIVER_HEAL_REWARD);
@@ -26759,6 +26779,9 @@ var EvioSim = (() => {
       // See tickSurvivalRevives — meaningless/always -1,0 outside survival.
       reviveTargetId: -1,
       reviveHoldTicks: 0,
+      // Player model scale (opcode 155/156, Qcqglqd/Qte59p5). 1 = normal size; set >1 for
+      // survival's boss. See SURVIVAL_BOSS_SCALE's own comment.
+      modelScale: 1,
       fireCooldown: 0,
       // ticks until the weapon can fire again
       spawnSeed: 0,
@@ -27795,6 +27818,11 @@ var EvioSim = (() => {
       9999,
       151,
       playerState.slideBoostTick || 0,
+      // 155/156 Qcqglqd/Qte59p5 — player model scale. See SURVIVAL_BOSS_SCALE's own comment.
+      155,
+      Number.isFinite(playerState.modelScale) ? playerState.modelScale : 1,
+      156,
+      Number.isFinite(playerState.modelScale) ? playerState.modelScale : 1,
       157,
       playerState.airJumps,
       158,
@@ -28062,6 +28090,8 @@ var EvioSim = (() => {
       // 238 — see state_builder.js's own comment on the dual bot-level/boss-reward meaning.
       botLevel: peer.botLevel,
       bossReward: SURVIVAL_BOSS_REWARD,
+      // 155/156 — see SURVIVAL_BOSS_SCALE's own comment.
+      modelScale: peer.playerState ? peer.playerState.modelScale : 1,
       // Opcode 235 = clan insignia image. This was MISSING, which is why a player saw their OWN clan
       // logo but never a peer's: the avatar is a PROP (the ~3 roster covers every session) whereas
       // the clan image is a per-ENTITY opcode, and it was only ever filled in for the local player's
@@ -28746,7 +28776,7 @@ var EvioSim = (() => {
   var _live = { sessions: null, startedAt: 0, globalTick: 0, tickStamps: [], draining: false };
   function reconcileBotCount() {
     if (!_live.spawnBot) return;
-    const liveBots = () => _live.listBots().filter((b2) => !b2.isSwordBot);
+    const liveBots = () => _live.listBots().filter((b2) => !b2.isSwordBot && !b2.isSurvivalBot);
     while (liveBots().length < BOT_COUNT) _live.spawnBot({ level: BOT_LEVEL });
     const excess = liveBots().length - BOT_COUNT;
     if (excess > 0) {
@@ -28755,7 +28785,7 @@ var EvioSim = (() => {
   }
   function reconcileSwordBotCount() {
     if (!_live.spawnBot) return;
-    const liveBots = () => _live.listBots().filter((b2) => b2.isSwordBot);
+    const liveBots = () => _live.listBots().filter((b2) => b2.isSwordBot && !b2.isSurvivalBot);
     while (liveBots().length < SWORD_BOT_COUNT) _live.spawnBot({ level: SWORD_BOT_LEVEL, swordOnly: true });
     const excess = liveBots().length - SWORD_BOT_COUNT;
     if (excess > 0) {
@@ -28952,6 +28982,54 @@ var EvioSim = (() => {
     desc: `The number shown in "{boss} spawned with {N}e reward" (opcode 238, overloaded with the normal bot-level badge \u2014 see state_builder.js). Cosmetic only \u2014 this project has no currency/wallet system of its own, so nothing is actually granted; it's purely the chat-announcement number the real client expects to see.`
   }, (v2) => {
     SURVIVAL_BOSS_REWARD = v2;
+  });
+  var SURVIVAL_BOSS_SCALE = define({
+    key: "survivalBossScale",
+    env: "EVIO_SURVIVAL_BOSS_SCALE",
+    type: "number",
+    def: 1.3,
+    min: 1,
+    max: 3,
+    step: 0.05,
+    category: "Survival",
+    label: "Boss model scale",
+    desc: `Confirmed real: the gamemode config ships a "bossScale" constant (default 1, Qxbns7f schema), sent to the client per-entity as opcode 155/156 (Qcqglqd/Qte59p5). Official's default is 1, meaning the LIVE value the user actually sees is a runtime override we can't read from the static bundle \u2014 1.3 is our own reasonable "slightly bigger" guess.`
+  }, (v2) => {
+    SURVIVAL_BOSS_SCALE = v2;
+  });
+  var SURVIVAL_BOSS_SKINS = [
+    {
+      skinUrl: "https://ev.io/sites/default/files/skins/bot_2.evskin",
+      thumbUrl: "https://ev.io/sites/default/files/skin_profile_thumbs/botred110x110.png"
+    },
+    {
+      skinUrl: "https://ev.io/sites/default/files/skins/zombiebot_0.evskin",
+      thumbUrl: "https://ev.io/sites/default/files/skin_profile_thumbs/zombiebot_head_0.png"
+    }
+  ];
+  var SURVIVAL_BOSS_NAMES = [
+    "Behemoth",
+    "Warlord",
+    "Colossus",
+    "Juggernaut",
+    "Devourer",
+    "Ravager",
+    "Titan",
+    "Warbringer"
+  ];
+  var SURVIVAL_MELEE_BOT_RATIO = define({
+    key: "survivalMeleeBotRatio",
+    env: "EVIO_SURVIVAL_MELEE_BOT_RATIO",
+    type: "number",
+    def: 0.25,
+    min: 0,
+    max: 1,
+    step: 0.05,
+    category: "Survival",
+    label: "Melee bot ratio",
+    desc: "Fraction of each newly-spawned survival bot that comes in sword-only instead of gun+sword \u2014 confirmed official survival has a distinct melee bot archetype; the exact spawn ratio isn't reverse-engineered from the bundle, this is our own reasonable choice."
+  }, (v2) => {
+    SURVIVAL_MELEE_BOT_RATIO = v2;
   });
   var SURVIVAL_RESURRECTION_TICKS = define({
     key: "survivalResurrectionTicks",
@@ -29205,7 +29283,8 @@ var EvioSim = (() => {
     );
     const targetLevel = Math.min(10, 5 + Math.floor(Math.max(0, wave - 1) / SURVIVAL_LEVEL_UP_EVERY_N_WAVES));
     while (survivalBots().length < targetCount) {
-      _live.spawnBot({ level: targetLevel, isSurvivalBot: true, name: "Bot" });
+      const meleeBot = Math.random() < SURVIVAL_MELEE_BOT_RATIO;
+      _live.spawnBot({ level: targetLevel, isSurvivalBot: true, name: "Bot", meleeBot });
     }
     const excess = survivalBots().length - targetCount;
     if (excess > 0) {
@@ -29213,15 +29292,28 @@ var EvioSim = (() => {
     }
     for (const b2 of survivalBots()) b2.botLevel = targetLevel;
     survivalState.activeSpecialWave = wave >= 1 && Math.random() < SURVIVAL_SPECIAL_WAVE_CHANCE ? pickSpecialWaveType() : null;
-    const forcedWeaponId = survivalState.activeSpecialWave && survivalState.activeSpecialWave.weaponId || 4;
-    for (const b2 of survivalBots()) _forceSurvivalBotWeapon(b2, forcedWeaponId);
+    for (const b2 of survivalBots()) {
+      const defaultWeapon = b2.isSwordBot ? SWORD_WEAPON_ID2 : 4;
+      const forcedWeaponId = survivalState.activeSpecialWave && survivalState.activeSpecialWave.weaponId || defaultWeapon;
+      _forceSurvivalBotWeapon(b2, forcedWeaponId);
+    }
     if (survivalState.activeSpecialWave) {
       console.log(`[evio-local] survival: wave ${wave} special wave \u2014 ${survivalState.activeSpecialWave.name}`);
     }
     if (wave >= 1 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
       const bossAlive = survivalState.bossPlayerId && sessions.get(survivalState.bossPlayerId);
       if (!bossAlive) {
-        const boss = _live.spawnBot({ level: 10, isSurvivalBot: true, isBoss: true, name: "BOSS" });
+        const bossName = SURVIVAL_BOSS_NAMES[Math.floor(Math.random() * SURVIVAL_BOSS_NAMES.length)];
+        const bossSkin = SURVIVAL_BOSS_SKINS[Math.floor(Math.random() * SURVIVAL_BOSS_SKINS.length)];
+        const boss = _live.spawnBot({
+          level: 10,
+          isSurvivalBot: true,
+          isBoss: true,
+          name: bossName,
+          skinUrl: bossSkin.skinUrl,
+          thumbUrl: bossSkin.thumbUrl,
+          modelScale: SURVIVAL_BOSS_SCALE
+        });
         survivalState.bossPlayerId = boss.playerId;
         console.log(`[evio-local] survival: wave ${wave} boss spawned (${boss.playerId})`);
       }
@@ -29836,6 +29928,7 @@ var EvioSim = (() => {
               isBoss: !!s2.isBoss,
               botLevel: s2.botLevel,
               bossReward: SURVIVAL_BOSS_REWARD,
+              modelScale: s2.playerState ? s2.playerState.modelScale : 1,
               officialBootstrapFields: OFFICIAL_BOOTSTRAP_FIELDS,
               customMap: true,
               matchTimer: match.timer,
@@ -30126,6 +30219,8 @@ var EvioSim = (() => {
       1
       // 16 Impulse Grenade (level 1 = 2 charges)
     ];
+    const SURVIVAL_MELEE_BOT_ABILITY_SEED = SWORD_BOT_ABILITY_SEED.slice();
+    SURVIVAL_MELEE_BOT_ABILITY_SEED[0] = 1;
     function spawnBot(opts = {}) {
       const spawnPoints = activeSpawnPoints();
       const spawnIndex = sessions.size;
@@ -30140,7 +30235,7 @@ var EvioSim = (() => {
         yaw: sp2.yaw * Math.PI / 180
       }, sessionId);
       playerState._holdForPlay = false;
-      const weaponId = opts.swordOnly ? SWORD_WEAPON_ID2 : Number.isFinite(opts.weaponId) ? opts.weaponId : SWORD_ONLY ? SWORD_WEAPON_ID2 : 4;
+      const weaponId = opts.swordOnly || opts.meleeBot ? SWORD_WEAPON_ID2 : Number.isFinite(opts.weaponId) ? opts.weaponId : SWORD_ONLY ? SWORD_WEAPON_ID2 : 4;
       playerState.equippedWeaponId = weaponId;
       playerState.backupWeaponId = -1;
       playerState.weaponList = weaponId === 262 ? [262] : [weaponId, 262];
@@ -30148,18 +30243,23 @@ var EvioSim = (() => {
       playerState._ammoGunId = weaponId;
       playerState.gunAmmo = weaponClip(weaponId, playerState);
       playerState.reloadTicks = 0;
-      const abilitySeed = _sanitizeAbilitySeed(opts.swordOnly ? SWORD_BOT_ABILITY_SEED : BOT_ABILITY_SEED);
+      const abilitySeed = _sanitizeAbilitySeed(
+        opts.swordOnly ? SWORD_BOT_ABILITY_SEED : opts.meleeBot ? SURVIVAL_MELEE_BOT_ABILITY_SEED : BOT_ABILITY_SEED
+      );
       if (playerState._ps && playerState._ps.Qz8l93a) {
         Object.assign(playerState._ps.Qz8l93a, computeWeaponStats(abilitySeed));
         refreshMagazineCapacity(playerState);
         playerState._ps.weaponStateArray = abilitySeed;
       }
+      if (Number.isFinite(opts.modelScale)) playerState.modelScale = opts.modelScale;
       const session = {
         ws: null,
         isBot: true,
         // Drives which combat branch driveBotFrame uses (_swordCombatFrame vs the plant-and-shoot gun
-        // branch) and which reconciler (reconcileBotCount vs reconcileSwordBotCount) owns this bot.
-        isSwordBot: !!opts.swordOnly,
+        // branch) and which reconciler (reconcileBotCount vs reconcileSwordBotCount) owns this bot —
+        // both reconcilers now exclude isSurvivalBot, so this is safe to set for a survival melee
+        // bot too (it needs the sword AI branch exactly like a deathmatch sword bot does).
+        isSwordBot: !!(opts.swordOnly || opts.meleeBot),
         // Owned by tickSurvivalWaves' own pool, separate from the deathmatch botCount/
         // swordBotCount pools reconcileBotCount/reconcileSwordBotCount manage — see that
         // function's own comment for why this doesn't go through the settings layer.
@@ -30185,8 +30285,8 @@ var EvioSim = (() => {
         uid: -1e3 - _botSeq,
         weaponId,
         skinTargetId: null,
-        skinUrl: BOT_SKIN_URL,
-        thumbUrl: BOT_THUMB_URL,
+        skinUrl: opts.skinUrl || BOT_SKIN_URL,
+        thumbUrl: opts.thumbUrl || BOT_THUMB_URL,
         skinRarity: null,
         clanImgUrl: null,
         clanLink: null,
