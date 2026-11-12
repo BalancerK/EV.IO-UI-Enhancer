@@ -1688,7 +1688,8 @@ function _rollPickupTier() {
 let _pickupState = [];
 function _resetPickupState() {
   _pickupState = (bpw.pickupPoints || []).map(() => ({
-    weaponTypeId: _randomPickupWeapon(), tier: _rollPickupTier(), availableAtTick: 0,
+    weaponTypeId: _randomPickupWeapon(), tier: _rollPickupTier(),
+    itemIndex: _rollPickupItem(), availableAtTick: 0,
   }));
 }
 
@@ -1856,6 +1857,7 @@ function processWeaponPickups(sessions, tick) {
   for (let i = 0; i < pts.length; i++) {
     const st = _pickupState[i];
     if (tick < st.availableAtTick) continue;   // on cooldown — see buildWeaponPickupBlock for the hide side of this
+    const isItem = st.itemIndex >= 0;
     const pt = pts[i];
     for (const s of sessions.values()) {
       if (!s || !s.accepted) continue;
@@ -1863,16 +1865,26 @@ function processWeaponPickups(sessions, tick) {
       // Sword bots are melee-only by design (own combat frame, own count/level settings — see
       // _swordCombatFrame / isSwordBot throughout) and never switch weapons (driveBotFrame never
       // presses a switch action for them either), so a gun pickup would just sit in their
-      // weaponList forever doing nothing. Skip them entirely rather than hand them dead weight.
-      if (s.isSwordBot) continue;
+      // weaponList forever doing nothing. Skip a WEAPON point for them — a health/armor item
+      // point has no such problem, every bot (melee included) can use one.
+      if (s.isSwordBot && !isItem) continue;
       const p = s.playerState;
       if (!p || !p.position || p._holdForPlay) continue;
       if (p.deathStateTimer > 0 || p.healthPoints <= 0) continue;
       const dist = Math.hypot(p.position.x - pt.x, (p.position.y + 1) - pt.y, p.position.z - pt.z);
       if (dist > PICKUP_RADIUS) continue;
-      _grantPickupWeapon(p, st.weaponTypeId, !!s.isBot);
+      if (isItem) {
+        if (st.itemIndex === SURVIVAL_ITEM_INDEX.HEALTH) {
+          p.healthPoints = Math.min(1, p.healthPoints + SURVIVAL_HEALTH_KIT_HEAL);
+        } else {
+          p.armorPoints = Math.min(1, p.armorPoints + SURVIVAL_ARMOR_KIT_AMOUNT);
+        }
+      } else {
+        _grantPickupWeapon(p, st.weaponTypeId, !!s.isBot);
+      }
       st.weaponTypeId = _randomPickupWeapon();   // pre-roll the NEXT weapon this point will offer
       st.tier = _rollPickupTier();               // and its glow tier — see buildWeaponPickupBlock
+      st.itemIndex = _rollPickupItem();          // and whether it's an item instead, next time
       st.availableAtTick = tick + PICKUP_RESPAWN_TICKS;
       break;   // point is now empty; no one else can take it this tick
     }
@@ -1928,7 +1940,13 @@ function buildWeaponPickupBlock() {
     // survival). In survival, st.tier (rolled when the point last respawned — see
     // SURVIVAL_TIER_GLOW_INDEX) picks a real color: white/blue/purple/gold for tier 1-4.
     const glowIndex = SURVIVAL_TIER_GLOW_INDEX[(st.tier || 1) - 1] ?? 0;
-    block.push(278, i, 270, i, 271, st.weaponTypeId, 273, hidden ? PICKUP_HIDE_SENTINEL : 0, 274, glowIndex, 275, null);
+    // 272 (Qqxcge5) — confirmed from the real renderer: -1 (default) is a normal weapon point;
+    // >=0 indexes the client's OWN active-items catalogue (Gh.Qcvnlvz) and renders THAT model
+    // instead, at this same point — neither 271 (weaponTypeId) nor 274 (glow) are even consulted
+    // by the client once this is >=0, so they're harmless left as whatever they currently are.
+    // See SURVIVAL_ITEM_INDEX's own comment for the full mechanism.
+    block.push(278, i, 270, i, 271, st.weaponTypeId, 272, Number.isFinite(st.itemIndex) ? st.itemIndex : -1,
+      273, hidden ? PICKUP_HIDE_SENTINEL : 0, 274, glowIndex, 275, null);
   }
   return block;
 }
@@ -3173,11 +3191,6 @@ function simulateGrenades(dt, sessions) {
   // sim AND the firing path (shooting a mine, fireHitscan runs earlier in the tick) and is cleared
   // once, after the broadcast (next to _pendingBullets). Resetting here would drop firing-time removals.
   for (const [key, g] of activeEntities) {
-    // Survival health/armor kits are stationary pickups, not grenades — none of this function's
-    // fuse/physics/explosion machinery applies to them (worse: stepEntity would force a
-    // non-finite fuse to 1 and then decrement it to 0 almost immediately, deleting the item a
-    // tick after it spawned). tickSurvivalItems owns their entire lifecycle instead.
-    if (g.isSurvivalItem) continue;
     // ── Per-entity isolation ────────────────────────────────────────────────────────────────────
     // This loop used to be bare. A throw from any one entity's trigger logic (a proximity scan, an
     // explosion, a raycast against geometry) escaped the whole function, which is called straight
@@ -8618,16 +8631,14 @@ function startNewRound(sessions) {
   // run regardless of how the last one ended (timer or wipe). Harmless no-op in deathmatch
   // (survivalOut is never set there, and the wave scheduler's own guard skips entirely).
   for (const s of sessions.values()) if (s) s.survivalOut = false;
-  // Remove every leftover survival bot (including the boss) HERE, synchronously — not next tick
-  // via tickSurvivalWaves' own excess-culling reacting to wave 0's target of 0. Leaving that to
-  // the reactive path meant every round transition bulk-removed however many bots the PREVIOUS
-  // round had built up to in one tick; confirmed live to crash the client (Qto0i2z reading
-  // .Qslw9vf off a bulletMap entry whose shooter had just been yanked out from under an
-  // in-flight shot). A round boundary removing its old bots immediately, deliberately, as part
-  // of the reset — rather than as a side effect the wave scheduler stumbles into — is correct
-  // regardless of this crash; it just also happens to close the highest-volume trigger for it.
-  if (_live.listBots && _live.removeBot) {
-    for (const b of _live.listBots()) if (b.isSurvivalBot) _live.removeBot(b.playerId);
+  // Every leftover survival bot (including the boss) stops being driven and gets scheduled for
+  // removal here — not removed on the spot (see SURVIVAL_BOT_REMOVAL_GRACE_TICKS' own comment on
+  // why an immediate removeBot() still crashed the client), and not left to tickSurvivalWaves'
+  // reactive excess-culling either (that was the ORIGINAL version of this same bug: a wave-0
+  // target of 0 bulk-removing however many bots the previous round had built up to, in one tick).
+  if (_live.listBots) {
+    const removeAt = _live.globalTick + SURVIVAL_BOT_REMOVAL_GRACE_TICKS;
+    for (const b of _live.listBots()) if (b.isSurvivalBot) b._survivalPendingRemoveAtTick = removeAt;
   }
   resetSurvivalState();
   // Qpa5f8z (opcode 298) — _live.globalTick, not the bare `globalTick` closure variable;
@@ -9142,10 +9153,38 @@ let SURVIVAL_BOSS_SCALE = S.define({
       + "can't read from the static bundle — 1.3 is our own reasonable \"slightly bigger\" guess.",
 }, (v) => { SURVIVAL_BOSS_SCALE = v; });
 
-// Random cosmetic variety for the boss — two REAL, bundle-confirmed skin/thumb pairs (not
-// invented ids, unlike the item-pickup mistake — see tickSurvivalItems' own comment on why that
-// matters). A proper "boss skin" might exist in the live CMS catalogue we don't have access to;
-// these are what the client bundle itself references as literal strings.
+// A round-start bot cleanup that calls removeBot() IMMEDIATELY still crashed the client live: a
+// bot that fired its last shot in the final tick(s) of the OLD round can still have that bullet
+// queued in the client's own sound/effect tracking (our own bulletMap comment: "age>=5 → deleted,
+// bundle 65684") when its shooter vanishes from the player map a tick or two later — several
+// independent client-side subsystems resolve a referenced owner with no null-check at all and
+// crash solid the instant one goes missing (confirmed live 3 separate times, 3 different call
+// sites, same shape: FnA->FnA->FnB->Qcxccma). Removing the bot EVENTUALLY is still correct and
+// necessary; removing it the INSTANT a round ends is what's unsafe. So instead: stop driving it
+// (no more new shots) immediately, and only actually delete the session once this many ticks
+// have passed — long enough that nothing it fired earlier could still be queued anywhere.
+let SURVIVAL_BOT_REMOVAL_GRACE_TICKS = S.define({
+  key: "survivalBotRemovalGraceTicks", env: "EVIO_SURVIVAL_BOT_REMOVAL_GRACE_TICKS", type: "int", def: 100, min: 10, max: 1200,
+  category: "Survival", label: "Bot removal grace period (ticks)",
+  desc: "How long a round-end leftover survival bot stands inert (no AI, no new shots) before "
+      + "actually being removed. 100 = 5s at 20Hz — generous headroom over the handful of ticks "
+      + "a client-side sound/effect reference can possibly still be live for.",
+}, (v) => { SURVIVAL_BOT_REMOVAL_GRACE_TICKS = v; });
+
+// Any survival bot (or boss) still marked for this delayed removal, past its grace period, is
+// actually deleted now. Driven from the main tick loop, same as every other survival-only phase.
+function tickSurvivalBotRemoval(sessions) {
+  const tick = _live.globalTick || 0;
+  for (const s of sessions.values()) {
+    if (s && s._survivalPendingRemoveAtTick && tick >= s._survivalPendingRemoveAtTick && _live.removeBot) {
+      _live.removeBot(s.playerId);
+    }
+  }
+}
+
+// Random cosmetic variety for the boss — REAL, bundle-confirmed skin/thumb pairs, not invented
+// ids (a prior attempt elsewhere in survival invented ids and crashed the client live — see
+// SURVIVAL_ITEM_INDEX's own comment on the corrected health/armor mechanism).
 // Only ONE confirmed-real skin here now — zombiebot_0 moved to the melee bot archetype below
 // (it's a zombie, that's where it belongs). "Random boss skin" is honestly just this one option
 // until a second real boss-appropriate skin/thumb pair turns up in the bundle.
@@ -9274,29 +9313,28 @@ function pickWeightedTier() {
 }
 
 // ── Survival health/armor item pickups ──────────────────────────────────────────────────────
-// Confirmed from the real client bundle: a "Health Kit" (+50% health) and "Armor" (+25% armor)
-// exist in the client's own active-items catalogue (Gh.Qcvnlvz — physics_extracted.js stubs
-// this as an unported Proxy, see its own comment), alongside their 3D models
-// (HealthBoost.evobj/ArmorBoost.evobj, which this project already has on disk). What's genuinely
-// UNCERTAIN here, flagged rather than silently assumed: we could not confirm from static bundle
-// analysis which wire mechanism actually spawns a world-lying item kit (unlike grenades, where
-// the "worldState.activeEntities" opcode 268 path is fully traced and verified). This reuses that
-// SAME activeEntities stream, with weaponTypeId values (9001/9002) chosen specifically OUTSIDE
-// the real grenade-type range to avoid colliding with one — if the client's generic entity
-// renderer resolves an unrecognized type id to nothing, the pickup EFFECT below still works
-// correctly end to end, it would just be invisible until verified live and corrected.
-const SURVIVAL_ITEM_TYPE = { HEALTH: 9001, ARMOR: 9002 };
+// CORRECTED mechanism — the previous activeEntities-based attempt was confirmed to crash the
+// client live (invented type ids weren't in the client's grenade data table) and was disabled.
+// The user's own observation ("health and shield spawn at the SAME points weapons use") pointed
+// straight at the real mechanism, since confirmed in the bundle: the weapon-pickup-point system
+// itself (worldState.Q6cohc3, our own buildWeaponPickupBlock) ALREADY has a second, independent
+// field for exactly this — opcode 272 (Qqxcge5). -1 (its default) means "normal weapon point";
+// >=0 INDEXES the client's own active-items catalogue (Gh.Qcvnlvz — index 0 = Health Kit heal
+// .5, index 1 = Armor .25, confirmed matching our own long-standing SURVIVAL_HEALTH_KIT_HEAL/
+// SURVIVAL_ARMOR_KIT_AMOUNT values) and renders THAT model instead, at the SAME point — no new
+// entity type, no separate spawn/despawn system, just a second possible "what's here" state for
+// a pickup point that already exists. Confirmed from the real renderer: when Qqxcge5>=0 it does
+// not even consult opcode 271 (weaponTypeId) or 274 (glow) — those keep whatever they were, just
+// unused for this point until it rolls back to a weapon.
+const SURVIVAL_ITEM_INDEX = { HEALTH: 0, ARMOR: 1, NONE: -1 };
 
-let SURVIVAL_ITEM_SPAWN_TICKS = S.define({
-  key: "survivalItemSpawnTicks", env: "EVIO_SURVIVAL_ITEM_SPAWN_TICKS", type: "int", def: 300, min: 20, max: 6000,
-  category: "Survival", label: "Item spawn interval (ticks)",
-  desc: "How often a new health/armor kit appears (while under the max below). 300 = 15s at 20Hz.",
-}, (v) => { SURVIVAL_ITEM_SPAWN_TICKS = v; });
-
-let SURVIVAL_MAX_ITEMS = S.define({
-  key: "survivalMaxItems", env: "EVIO_SURVIVAL_MAX_ITEMS", type: "int", def: 3, min: 0, max: 20,
-  category: "Survival", label: "Max items on the ground at once",
-}, (v) => { SURVIVAL_MAX_ITEMS = v; });
+let SURVIVAL_ITEM_CHANCE = S.define({
+  key: "survivalItemChance", env: "EVIO_SURVIVAL_ITEM_CHANCE", type: "number", def: 0.25, min: 0, max: 1, step: 0.05,
+  category: "Survival", label: "Item chance per pickup reroll",
+  desc: "Odds a pickup point becomes a health/armor item instead of a weapon each time it "
+      + "rerolls (initial spawn, or after being taken) — confirmed real that items share the "
+      + "weapon spawn points; the exact roll odds aren't reverse-engineered from the bundle.",
+}, (v) => { SURVIVAL_ITEM_CHANCE = v; });
 
 let SURVIVAL_HEALTH_KIT_HEAL = S.define({
   key: "survivalHealthKitHeal", env: "EVIO_SURVIVAL_HEALTH_KIT_HEAL", type: "number", def: 0.5, min: 0.05, max: 1, step: 0.05,
@@ -9310,76 +9348,12 @@ let SURVIVAL_ARMOR_KIT_AMOUNT = S.define({
   desc: "Confirmed from the real client's own item catalogue (Armor: .25 = 25%).",
 }, (v) => { SURVIVAL_ARMOR_KIT_AMOUNT = v; });
 
-let _survivalLastItemSpawnTick = 0;
-
-function spawnSurvivalItem() {
-  // DISABLED — see tickSurvivalItems' own comment. Guarded here too (not just at the tick
-  // caller) so nothing — including a future call site, a test, or an admin-dashboard button —
-  // can accidentally stream one of these broken entities to a connected client.
-  return;
-  // eslint-disable-next-line no-unreachable
-  const pts = bpw.pickupPoints || [];
-  if (!pts.length) return;
-  const pt = pts[Math.floor(Math.random() * pts.length)];
-  const isHealth = Math.random() < 0.5;
-  const key = ++_entityCounter;
-  activeEntities.set(key, {
-    sessionId: key,
-    ownerSid: null,
-    pos: { x: pt.x, y: pt.y, z: pt.z },
-    vel: { x: 0, y: 0, z: 0 },      // stationary — not thrown, just sitting on the ground
-    type: isHealth ? SURVIVAL_ITEM_TYPE.HEALTH : SURVIVAL_ITEM_TYPE.ARMOR,
-    numberProp: 0,
-    spawnTick: 0,
-    _bornTick: _live.globalTick || 0,
-    fuse: Infinity,                 // never auto-expires — only removed by pickup or round reset
-    isStuck: 0,
-    qt6bqft: null,                  // must be explicit — see buildActiveEntityBlock's own comment
-    isSurvivalItem: true,           // marks this for tickSurvivalItems' own proximity sweep
-  });
-}
-
-// Periodic spawn + proximity pickup for health/armor kits. A no-op outside survival, same
-// pattern as every other survival-only tick function.
-function tickSurvivalItems(sessions) {
-  // DISABLED — confirmed LIVE-BREAKING, not just unverified: the real client's own grenade
-  // renderer (Qhezul1) does `dataById[entity.type].gravity` with NO guard on the lookup failing,
-  // and our invented type ids (9001/9002, picked specifically to avoid colliding with a real
-  // grenade type) aren't in that table at all, so dataById[...] is undefined and the client
-  // crashes solid ("Cannot read properties of undefined (reading 'gravity')") the instant one of
-  // these spawns. "Picked up a Health Kit"/"Picked up Armor" ARE real client-side toast strings,
-  // but they're reached through a mechanism this project hasn't identified yet — definitely not
-  // the activeEntities/dataById path grenades use. Keeping the proximity-pickup/heal logic below
-  // intact (harmless, never runs while spawning is off) so re-enabling is a one-line fix once the
-  // real wire mechanism is found — see spawnSurvivalItem's own comment.
-  return;
-  // eslint-disable-next-line no-unreachable
-  if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
-  const tick = _live.globalTick || 0;
-  let liveItemCount = 0;
-  for (const g of activeEntities.values()) if (g.isSurvivalItem) liveItemCount++;
-  if (tick - _survivalLastItemSpawnTick >= SURVIVAL_ITEM_SPAWN_TICKS && liveItemCount < SURVIVAL_MAX_ITEMS) {
-    _survivalLastItemSpawnTick = tick;
-    spawnSurvivalItem();
-  }
-
-  for (const [key, g] of activeEntities) {
-    if (!g.isSurvivalItem) continue;
-    for (const s of sessions.values()) {
-      if (!s || !s.accepted) continue;
-      const p = s.playerState;
-      if (!p || !p.position || p._holdForPlay || p.deathStateTimer > 0 || p.healthPoints <= 0) continue;
-      if (_distance(p.position, g.pos) > PICKUP_RADIUS) continue;
-      if (g.type === SURVIVAL_ITEM_TYPE.HEALTH) {
-        p.healthPoints = Math.min(1, p.healthPoints + SURVIVAL_HEALTH_KIT_HEAL);
-      } else {
-        p.armorPoints = Math.min(1, p.armorPoints + SURVIVAL_ARMOR_KIT_AMOUNT);
-      }
-      activeEntities.delete(key);
-      removedEntityKeys.push(key);
-      break;   // this item is gone; no one else can take it
-    }
-  }
+// Rolls what a pickup point offers on (re)spawn — survival-only, matching _rollPickupTier's own
+// pattern. Deathmatch always gets NONE (a plain weapon point, unchanged from before this existed).
+function _rollPickupItem() {
+  if (GAME_MODE !== "survival") return SURVIVAL_ITEM_INDEX.NONE;
+  if (Math.random() >= SURVIVAL_ITEM_CHANCE) return SURVIVAL_ITEM_INDEX.NONE;
+  return Math.random() < 0.5 ? SURVIVAL_ITEM_INDEX.HEALTH : SURVIVAL_ITEM_INDEX.ARMOR;
 }
 
 // Ephemeral — not persisted, reset every round (startNewRound) and on mode switch. Deliberately
@@ -9440,7 +9414,10 @@ function tickSurvivalWaves(sessions) {
   if (wave <= survivalState.currentWave) return;
   survivalState.currentWave = wave;
 
-  const survivalBots = () => _live.listBots().filter((b) => b.isSurvivalBot && !b.isBoss);
+  // Excludes bots already scheduled for delayed removal (see SURVIVAL_BOT_REMOVAL_GRACE_TICKS) —
+  // otherwise a fresh round's wave-0 target of 0 would count them as "still here" and try to
+  // excess-cull them synchronously right now, defeating the whole point of the delay.
+  const survivalBots = () => _live.listBots().filter((b) => b.isSurvivalBot && !b.isBoss && !b._survivalPendingRemoveAtTick);
   // Wave < 1 is the initial delay ("Wave 0" on the HUD) — no bots yet, matching the official
   // client's own "0 bots alive" at the very start of a survival round.
   const targetCount = wave < 1 ? 0 : Math.min(
@@ -10226,7 +10203,7 @@ function startServer() {
     // own first line). After tickMatch so a wipe this exact tick already flipped match.gameMode
     // to the round-over phase, which this function's own guard then correctly skips.
     _phase("survivalWaves", () => tickSurvivalWaves(sessions));
-    _phase("survivalItems", () => tickSurvivalItems(sessions));
+    _phase("survivalBotRemoval", () => tickSurvivalBotRemoval(sessions));
 
     // Advance every accepted player's PEER-broadcast position (see updateBroadcastPosition) — AFTER
     // physics/respawn/teleport for this tick (so a respawn this tick is already reflected in the
@@ -11074,6 +11051,10 @@ function startServer() {
   function driveBots(liveSessions) {
     for (const s of liveSessions.values()) {
       if (!s || !s.accepted || !s.isBot) continue;
+      // Scheduled for removal (see SURVIVAL_BOT_REMOVAL_GRACE_TICKS) — stand inert for the rest
+      // of its grace period rather than keep firing and extending the window the removal has to
+      // wait out.
+      if (s._survivalPendingRemoveAtTick) continue;
       s.inputQueue.push({ clientTick: ++s._botClientTick, frames: [driveBotFrame(s, liveSessions, globalTick)] });
       s.lastClientTick = s._botClientTick;
       s._lastInputMs = Date.now();
@@ -12124,8 +12105,7 @@ const serverExports = {
   // reasoning as getSessions()/getParityRings() above for other reassignable module state).
   tickSurvivalWaves,
   tickSurvivalRevives,
-  tickSurvivalItems,
-  spawnSurvivalItem,
+  tickSurvivalBotRemoval,
   pickWeightedTier,
   SURVIVAL_TIER_GLOW_INDEX,
   SPECIAL_WAVE_TYPES,

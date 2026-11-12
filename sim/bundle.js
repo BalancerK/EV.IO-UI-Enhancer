@@ -23557,6 +23557,7 @@ var EvioSim = (() => {
     _pickupState = (physics_world_default.pickupPoints || []).map(() => ({
       weaponTypeId: _randomPickupWeapon(),
       tier: _rollPickupTier(),
+      itemIndex: _rollPickupItem(),
       availableAtTick: 0
     }));
   }
@@ -23653,19 +23654,29 @@ var EvioSim = (() => {
     for (let i2 = 0; i2 < pts.length; i2++) {
       const st2 = _pickupState[i2];
       if (tick < st2.availableAtTick) continue;
+      const isItem = st2.itemIndex >= 0;
       const pt2 = pts[i2];
       for (const s2 of sessions.values()) {
         if (!s2 || !s2.accepted) continue;
         if (s2.isBot && !PICKUP_BOT_ENABLED) continue;
-        if (s2.isSwordBot) continue;
+        if (s2.isSwordBot && !isItem) continue;
         const p2 = s2.playerState;
         if (!p2 || !p2.position || p2._holdForPlay) continue;
         if (p2.deathStateTimer > 0 || p2.healthPoints <= 0) continue;
         const dist = Math.hypot(p2.position.x - pt2.x, p2.position.y + 1 - pt2.y, p2.position.z - pt2.z);
         if (dist > PICKUP_RADIUS) continue;
-        _grantPickupWeapon(p2, st2.weaponTypeId, !!s2.isBot);
+        if (isItem) {
+          if (st2.itemIndex === SURVIVAL_ITEM_INDEX.HEALTH) {
+            p2.healthPoints = Math.min(1, p2.healthPoints + SURVIVAL_HEALTH_KIT_HEAL);
+          } else {
+            p2.armorPoints = Math.min(1, p2.armorPoints + SURVIVAL_ARMOR_KIT_AMOUNT);
+          }
+        } else {
+          _grantPickupWeapon(p2, st2.weaponTypeId, !!s2.isBot);
+        }
         st2.weaponTypeId = _randomPickupWeapon();
         st2.tier = _rollPickupTier();
+        st2.itemIndex = _rollPickupItem();
         st2.availableAtTick = tick + PICKUP_RESPAWN_TICKS;
         break;
       }
@@ -23681,7 +23692,22 @@ var EvioSim = (() => {
       const st2 = _pickupState[i2];
       const hidden = now < st2.availableAtTick;
       const glowIndex = SURVIVAL_TIER_GLOW_INDEX[(st2.tier || 1) - 1] ?? 0;
-      block.push(278, i2, 270, i2, 271, st2.weaponTypeId, 273, hidden ? PICKUP_HIDE_SENTINEL : 0, 274, glowIndex, 275, null);
+      block.push(
+        278,
+        i2,
+        270,
+        i2,
+        271,
+        st2.weaponTypeId,
+        272,
+        Number.isFinite(st2.itemIndex) ? st2.itemIndex : -1,
+        273,
+        hidden ? PICKUP_HIDE_SENTINEL : 0,
+        274,
+        glowIndex,
+        275,
+        null
+      );
     }
     return block;
   }
@@ -24670,7 +24696,6 @@ var EvioSim = (() => {
   function simulateGrenades(dt2, sessions) {
     enforceEntityCap();
     for (const [key, g2] of activeEntities) {
-      if (g2.isSurvivalItem) continue;
       try {
         if (g2._catchUp > 0) {
           const extra = g2._catchUp;
@@ -28542,8 +28567,9 @@ var EvioSim = (() => {
     resetMatchTimer();
     respawnAll(sessions);
     for (const s2 of sessions.values()) if (s2) s2.survivalOut = false;
-    if (_live.listBots && _live.removeBot) {
-      for (const b2 of _live.listBots()) if (b2.isSurvivalBot) _live.removeBot(b2.playerId);
+    if (_live.listBots) {
+      const removeAt = _live.globalTick + SURVIVAL_BOT_REMOVAL_GRACE_TICKS;
+      for (const b2 of _live.listBots()) if (b2.isSurvivalBot) b2._survivalPendingRemoveAtTick = removeAt;
     }
     resetSurvivalState();
     match.roundStartTick = _live.globalTick;
@@ -29002,6 +29028,27 @@ var EvioSim = (() => {
   }, (v2) => {
     SURVIVAL_BOSS_SCALE = v2;
   });
+  var SURVIVAL_BOT_REMOVAL_GRACE_TICKS = define({
+    key: "survivalBotRemovalGraceTicks",
+    env: "EVIO_SURVIVAL_BOT_REMOVAL_GRACE_TICKS",
+    type: "int",
+    def: 100,
+    min: 10,
+    max: 1200,
+    category: "Survival",
+    label: "Bot removal grace period (ticks)",
+    desc: "How long a round-end leftover survival bot stands inert (no AI, no new shots) before actually being removed. 100 = 5s at 20Hz \u2014 generous headroom over the handful of ticks a client-side sound/effect reference can possibly still be live for."
+  }, (v2) => {
+    SURVIVAL_BOT_REMOVAL_GRACE_TICKS = v2;
+  });
+  function tickSurvivalBotRemoval(sessions) {
+    const tick = _live.globalTick || 0;
+    for (const s2 of sessions.values()) {
+      if (s2 && s2._survivalPendingRemoveAtTick && tick >= s2._survivalPendingRemoveAtTick && _live.removeBot) {
+        _live.removeBot(s2.playerId);
+      }
+    }
+  }
   var SURVIVAL_BOSS_SKINS = [
     {
       skinUrl: "https://ev.io/sites/default/files/skins/bot_2.evskin",
@@ -29148,31 +29195,20 @@ var EvioSim = (() => {
     }
     return 1;
   }
-  var SURVIVAL_ITEM_TYPE = { HEALTH: 9001, ARMOR: 9002 };
-  var SURVIVAL_ITEM_SPAWN_TICKS = define({
-    key: "survivalItemSpawnTicks",
-    env: "EVIO_SURVIVAL_ITEM_SPAWN_TICKS",
-    type: "int",
-    def: 300,
-    min: 20,
-    max: 6e3,
-    category: "Survival",
-    label: "Item spawn interval (ticks)",
-    desc: "How often a new health/armor kit appears (while under the max below). 300 = 15s at 20Hz."
-  }, (v2) => {
-    SURVIVAL_ITEM_SPAWN_TICKS = v2;
-  });
-  var SURVIVAL_MAX_ITEMS = define({
-    key: "survivalMaxItems",
-    env: "EVIO_SURVIVAL_MAX_ITEMS",
-    type: "int",
-    def: 3,
+  var SURVIVAL_ITEM_INDEX = { HEALTH: 0, ARMOR: 1, NONE: -1 };
+  var SURVIVAL_ITEM_CHANCE = define({
+    key: "survivalItemChance",
+    env: "EVIO_SURVIVAL_ITEM_CHANCE",
+    type: "number",
+    def: 0.25,
     min: 0,
-    max: 20,
+    max: 1,
+    step: 0.05,
     category: "Survival",
-    label: "Max items on the ground at once"
+    label: "Item chance per pickup reroll",
+    desc: "Odds a pickup point becomes a health/armor item instead of a weapon each time it rerolls (initial spawn, or after being taken) \u2014 confirmed real that items share the weapon spawn points; the exact roll odds aren't reverse-engineered from the bundle."
   }, (v2) => {
-    SURVIVAL_MAX_ITEMS = v2;
+    SURVIVAL_ITEM_CHANCE = v2;
   });
   var SURVIVAL_HEALTH_KIT_HEAL = define({
     key: "survivalHealthKitHeal",
@@ -29202,60 +29238,10 @@ var EvioSim = (() => {
   }, (v2) => {
     SURVIVAL_ARMOR_KIT_AMOUNT = v2;
   });
-  var _survivalLastItemSpawnTick = 0;
-  function spawnSurvivalItem() {
-    return;
-    const pts = physics_world_default.pickupPoints || [];
-    if (!pts.length) return;
-    const pt2 = pts[Math.floor(Math.random() * pts.length)];
-    const isHealth = Math.random() < 0.5;
-    const key = ++_entityCounter;
-    activeEntities.set(key, {
-      sessionId: key,
-      ownerSid: null,
-      pos: { x: pt2.x, y: pt2.y, z: pt2.z },
-      vel: { x: 0, y: 0, z: 0 },
-      // stationary — not thrown, just sitting on the ground
-      type: isHealth ? SURVIVAL_ITEM_TYPE.HEALTH : SURVIVAL_ITEM_TYPE.ARMOR,
-      numberProp: 0,
-      spawnTick: 0,
-      _bornTick: _live.globalTick || 0,
-      fuse: Infinity,
-      // never auto-expires — only removed by pickup or round reset
-      isStuck: 0,
-      qt6bqft: null,
-      // must be explicit — see buildActiveEntityBlock's own comment
-      isSurvivalItem: true
-      // marks this for tickSurvivalItems' own proximity sweep
-    });
-  }
-  function tickSurvivalItems(sessions) {
-    return;
-    if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
-    const tick = _live.globalTick || 0;
-    let liveItemCount = 0;
-    for (const g2 of activeEntities.values()) if (g2.isSurvivalItem) liveItemCount++;
-    if (tick - _survivalLastItemSpawnTick >= SURVIVAL_ITEM_SPAWN_TICKS && liveItemCount < SURVIVAL_MAX_ITEMS) {
-      _survivalLastItemSpawnTick = tick;
-      spawnSurvivalItem();
-    }
-    for (const [key, g2] of activeEntities) {
-      if (!g2.isSurvivalItem) continue;
-      for (const s2 of sessions.values()) {
-        if (!s2 || !s2.accepted) continue;
-        const p2 = s2.playerState;
-        if (!p2 || !p2.position || p2._holdForPlay || p2.deathStateTimer > 0 || p2.healthPoints <= 0) continue;
-        if (_distance(p2.position, g2.pos) > PICKUP_RADIUS) continue;
-        if (g2.type === SURVIVAL_ITEM_TYPE.HEALTH) {
-          p2.healthPoints = Math.min(1, p2.healthPoints + SURVIVAL_HEALTH_KIT_HEAL);
-        } else {
-          p2.armorPoints = Math.min(1, p2.armorPoints + SURVIVAL_ARMOR_KIT_AMOUNT);
-        }
-        activeEntities.delete(key);
-        removedEntityKeys.push(key);
-        break;
-      }
-    }
+  function _rollPickupItem() {
+    if (GAME_MODE !== "survival") return SURVIVAL_ITEM_INDEX.NONE;
+    if (Math.random() >= SURVIVAL_ITEM_CHANCE) return SURVIVAL_ITEM_INDEX.NONE;
+    return Math.random() < 0.5 ? SURVIVAL_ITEM_INDEX.HEALTH : SURVIVAL_ITEM_INDEX.ARMOR;
   }
   var survivalState = { currentWave: -1, bossPlayerId: null, activeSpecialWave: null };
   function resetSurvivalState() {
@@ -29284,7 +29270,7 @@ var EvioSim = (() => {
     const wave = survivalWaveNumber(_live.globalTick);
     if (wave <= survivalState.currentWave) return;
     survivalState.currentWave = wave;
-    const survivalBots = () => _live.listBots().filter((b2) => b2.isSurvivalBot && !b2.isBoss);
+    const survivalBots = () => _live.listBots().filter((b2) => b2.isSurvivalBot && !b2.isBoss && !b2._survivalPendingRemoveAtTick);
     const targetCount = wave < 1 ? 0 : Math.min(
       SURVIVAL_MAX_BOT_COUNT,
       Math.floor(SURVIVAL_BASE_BOT_COUNT + (wave - 1) * SURVIVAL_BOT_COUNT_PER_WAVE)
@@ -29874,7 +29860,7 @@ var EvioSim = (() => {
       _phase("survivalRevives", () => tickSurvivalRevives(sessions));
       _phase("match", () => tickMatch(sessions));
       _phase("survivalWaves", () => tickSurvivalWaves(sessions));
-      _phase("survivalItems", () => tickSurvivalItems(sessions));
+      _phase("survivalBotRemoval", () => tickSurvivalBotRemoval(sessions));
       _phase("peerSmoothing", () => {
         for (const s2 of sessions.values()) {
           if (!s2.accepted || !s2.playerState) continue;
@@ -30408,6 +30394,7 @@ var EvioSim = (() => {
     function driveBots(liveSessions) {
       for (const s2 of liveSessions.values()) {
         if (!s2 || !s2.accepted || !s2.isBot) continue;
+        if (s2._survivalPendingRemoveAtTick) continue;
         s2.inputQueue.push({ clientTick: ++s2._botClientTick, frames: [driveBotFrame(s2, liveSessions, globalTick)] });
         s2.lastClientTick = s2._botClientTick;
         s2._lastInputMs = Date.now();
@@ -31197,8 +31184,7 @@ var EvioSim = (() => {
     // reasoning as getSessions()/getParityRings() above for other reassignable module state).
     tickSurvivalWaves,
     tickSurvivalRevives,
-    tickSurvivalItems,
-    spawnSurvivalItem,
+    tickSurvivalBotRemoval,
     pickWeightedTier,
     SURVIVAL_TIER_GLOW_INDEX,
     SPECIAL_WAVE_TYPES,
