@@ -3981,12 +3981,19 @@ function applyDamage(victim, amount, attacker, opts) {
   // and correct if it's ever called against anything other than the live game's session set.
   // `attacker !== victim` excludes self-damage (a bot's own fall, or its own grenade catching it) —
   // this only ever blocks damage between two DIFFERENT bots.
-  if (!BOT_FRIENDLY_FIRE && attacker && attacker !== victim
+  // Survival's own bots/boss are co-op allies of EACH OTHER too, not just of real players — they
+  // never fight each other regardless of the botFriendlyFire setting (that setting is a
+  // deathmatch-only toggle; survival's bot horde is always one side).
+  if (GAME_MODE === "survival" && attacker && attacker !== victim
+      && opts && opts.attackerIsBot && opts.victimIsBot) {
+    return;
+  }
+  if (!BOT_FRIENDLY_FIRE && GAME_MODE !== "survival" && attacker && attacker !== victim
       && opts && opts.attackerIsBot && opts.victimIsBot) {
     return;
   }
   // Survival is co-op, not every-player-for-themselves — real-player-vs-bot and bot-vs-bot
-  // (governed by botFriendlyFire above) are unaffected; only real-vs-real is blocked.
+  // (handled above) are unaffected; only real-vs-real is blocked.
   if (GAME_MODE === "survival" && attacker && attacker !== victim
       && opts && !opts.attackerIsBot && !opts.victimIsBot) {
     return;
@@ -8605,13 +8612,18 @@ function tickMatch(sessions) {
   if (!ROUNDS_ENABLED) return;
   const wasPlaying = match.gameMode === 0;
   match.timer -= 1;
-  // Survival: the round ends the moment every REAL (non-bot) player is out (processDeathRespawn
-  // sets survivalOut once a dead player's respawn would otherwise have fired) — not on a fixed
-  // schedule. Forcing the timer to <=0 here, rather than duplicating the round-over
+  // Survival: the round ends the INSTANT no real player is still standing — not when the
+  // bleed-out window finally finalizes the last one as survivalOut. Once everyone is either
+  // finalized out OR currently downed, nobody is left who could revive anybody, so the round is
+  // unwinnable right then; waiting out the bleed-out timer on the last player would just be a
+  // pointless delay before the inevitable. "Standing" = accepted, not held, deathStateTimer<=0,
+  // healthPoints>0. Forcing the timer to <=0 here, rather than duplicating the round-over
   // announcement below, means this takes the exact same path a normal timer expiry would.
   if (GAME_MODE === "survival" && wasPlaying) {
-    const real = [...sessions.values()].filter((s) => s && s.accepted && !s.isBot);
-    if (real.length && real.every((s) => s.survivalOut)) match.timer = Math.min(match.timer, 0);
+    const real = [...sessions.values()].filter((s) => s && s.accepted && !s.isBot && s.playerState);
+    const anyStanding = real.some((s) => !s.survivalOut
+      && s.playerState.deathStateTimer <= 0 && s.playerState.healthPoints > 0);
+    if (real.length && !anyStanding) match.timer = Math.min(match.timer, 0);
   }
   if (match.timer <= 0 && wasPlaying) {
     // Round over: switch to the scoreboard phase. The client hides weapons and shows

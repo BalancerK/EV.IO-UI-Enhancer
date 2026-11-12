@@ -25468,7 +25468,10 @@ var EvioSim = (() => {
   function applyDamage(victim, amount, attacker, opts) {
     if (victim && victim._ps && Number.isFinite(victim._ps.Qalaptp) && victim._ps.Qalaptp > 0) return;
     if (victim && victim._holdForPlay) return;
-    if (!BOT_FRIENDLY_FIRE && attacker && attacker !== victim && opts && opts.attackerIsBot && opts.victimIsBot) {
+    if (GAME_MODE === "survival" && attacker && attacker !== victim && opts && opts.attackerIsBot && opts.victimIsBot) {
+      return;
+    }
+    if (!BOT_FRIENDLY_FIRE && GAME_MODE !== "survival" && attacker && attacker !== victim && opts && opts.attackerIsBot && opts.victimIsBot) {
       return;
     }
     if (GAME_MODE === "survival" && attacker && attacker !== victim && opts && !opts.attackerIsBot && !opts.victimIsBot) {
@@ -28523,8 +28526,9 @@ var EvioSim = (() => {
     const wasPlaying = match.gameMode === 0;
     match.timer -= 1;
     if (GAME_MODE === "survival" && wasPlaying) {
-      const real = [...sessions.values()].filter((s2) => s2 && s2.accepted && !s2.isBot);
-      if (real.length && real.every((s2) => s2.survivalOut)) match.timer = Math.min(match.timer, 0);
+      const real = [...sessions.values()].filter((s2) => s2 && s2.accepted && !s2.isBot && s2.playerState);
+      const anyStanding = real.some((s2) => !s2.survivalOut && s2.playerState.deathStateTimer <= 0 && s2.playerState.healthPoints > 0);
+      if (real.length && !anyStanding) match.timer = Math.min(match.timer, 0);
     }
     if (match.timer <= 0 && wasPlaying) {
       match.gameMode = ROUND_END_GAMEMODE;
