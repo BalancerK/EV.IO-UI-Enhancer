@@ -1600,7 +1600,7 @@ function weaponClip(nid, playerState) {
 function refreshMagazineCapacity(playerState) {
   if (!playerState) return;
   const nid = playerState._ammoGunId;
-  if (!Number.isFinite(nid) || nid === SWORD_WEAPON_ID) return;   // the sword has no magazine
+  if (!Number.isFinite(nid) || WEAPON_MELEE[nid]) return;   // no melee weapon has a magazine
   playerState.gunAmmo = weaponClip(nid, playerState);
   playerState.reloadTicks = 0;
 }
@@ -1707,7 +1707,7 @@ function _resetPickupState() {
 // nothing was queued to repeat it. Mirrors how activeEntities' removals are detected in the
 // (also unconditional) grenade sim step rather than in the broadcast loop, for the identical reason.
 function _advanceWeaponSlotTracking(p) {
-  const curWeaponIds = Array.isArray(p.weaponList) ? p.weaponList.filter((w) => w !== SWORD_WEAPON_ID) : [];
+  const curWeaponIds = Array.isArray(p.weaponList) ? p.weaponList.filter((w) => !WEAPON_MELEE[w]) : [];
   const prevWeaponIds = Array.isArray(p._prevEmitWeaponIds) ? p._prevEmitWeaponIds : [];
   if (!p._weaponSlotRemovalRepeat) p._weaponSlotRemovalRepeat = new Map();
   for (const oldId of prevWeaponIds) {
@@ -2032,6 +2032,12 @@ const WEAPON_MELEE = (() => {
 // an env var inline differs between cmd.exe, PowerShell and sh — `npm run start:sword` works
 // the same everywhere).
 const SWORD_WEAPON_ID = 262;
+// Survival's melee bot archetype uses the real "Zombie Melee" weapon (nid 343), not the sword —
+// confirmed in weapons.json: same melee shape as the sword (999999 clip, no reload) but
+// `"invisible": true`, meaning it renders NO weapon model at all, matching the user's "zombie
+// animation without sword" — this is what makes these bots render bare-handed/clawing instead of
+// carrying a blade.
+const ZOMBIE_MELEE_WEAPON_ID = 343;
 let SWORD_ONLY = S.define({
   key: "swordOnly", env: "EVIO_SWORD_ONLY", type: "bool",
   def: process.argv.includes("--sword-only"),
@@ -3945,6 +3951,10 @@ function tickHealthRegen(p) {
   p.ticksSinceDamage = (p.ticksSinceDamage || 0) + 1;
   p.ticksSinceKill = (p.ticksSinceKill || 0) + 1;
   if (p.deathStateTimer > 0) return;                 // dead players do not regenerate
+  // Confirmed from the real survival gamemode config: noHealthRegen:true — unlike deathmatch,
+  // there is no passive OR kill-triggered regen at all in survival; health only comes back via
+  // the revive mechanic (SURVIVAL_REVIVE_HEAL) or a health kit.
+  if (GAME_MODE === "survival") return;
 
   // Fires on the exact tick, matching the client's `=== round(regenXTicksAfterKill)`.
   if (p.ticksSinceKill === REGEN_AFTER_KILL_TICKS) p.forceRegen = true;
@@ -5367,7 +5377,7 @@ function _findGunLineThreat(session, sessions) {
     if (!s || !s.accepted || s === session) continue;
     const e = s.playerState;
     if (!e || !e.position || e.deathStateTimer > 0 || e.healthPoints <= 0) continue;
-    if (e.equippedWeaponId === SWORD_WEAPON_ID) continue;   // melee — no line-of-fire threat
+    if (WEAPON_MELEE[e.equippedWeaponId]) continue;   // melee — no line-of-fire threat
     const eEyeY = e.crouching ? CROUCH_EYE_Y : STAND_EYE_Y;
     const ex = e.position.x, ey = e.position.y + eEyeY, ez = e.position.z;
     const dx = myEye.x - ex, dy = myEye.y - ey, dz = myEye.z - ez;
@@ -5457,7 +5467,7 @@ function _swordCombatFrame(session, curve, target, tick, sessions) {
   const hpFraction = Number.isFinite(p.healthPoints) ? p.healthPoints : 1;
   const wounded = hpFraction <= SWORD_LOW_HP_FRACTION;
   const targetPs = target.session && target.session.playerState;
-  const targetIsGunUser = !!targetPs && targetPs.equippedWeaponId !== SWORD_WEAPON_ID;
+  const targetIsGunUser = !!targetPs && !WEAPON_MELEE[targetPs.equippedWeaponId];
 
   // Aim/swing reuses the exact same cone/reaction/turn-rate model every bot uses — melee needs no
   // different AIM logic, only a distance gate on top (no point swinging from 10 units away).
@@ -7485,7 +7495,7 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
   const _gunId = held ? null : playerState._ammoGunId;
   if (!held) {
     const weaponIds = (Array.isArray(playerState.weaponList) ? playerState.weaponList : [])
-      .filter((w) => w !== SWORD_WEAPON_ID);
+      .filter((w) => !WEAPON_MELEE[w]);
     // Removed slots: anything still inside its re-announce window (see the post-broadcast sweep,
     // which is what actually POPULATES/ages playerState._weaponSlotRemovalRepeat — deliberately NOT
     // done here). A removal used to be sent on exactly ONE tick — the SAME mistake activeEntities'
@@ -8608,6 +8618,17 @@ function startNewRound(sessions) {
   // run regardless of how the last one ended (timer or wipe). Harmless no-op in deathmatch
   // (survivalOut is never set there, and the wave scheduler's own guard skips entirely).
   for (const s of sessions.values()) if (s) s.survivalOut = false;
+  // Remove every leftover survival bot (including the boss) HERE, synchronously — not next tick
+  // via tickSurvivalWaves' own excess-culling reacting to wave 0's target of 0. Leaving that to
+  // the reactive path meant every round transition bulk-removed however many bots the PREVIOUS
+  // round had built up to in one tick; confirmed live to crash the client (Qto0i2z reading
+  // .Qslw9vf off a bulletMap entry whose shooter had just been yanked out from under an
+  // in-flight shot). A round boundary removing its old bots immediately, deliberately, as part
+  // of the reset — rather than as a side effect the wave scheduler stumbles into — is correct
+  // regardless of this crash; it just also happens to close the highest-volume trigger for it.
+  if (_live.listBots && _live.removeBot) {
+    for (const b of _live.listBots()) if (b.isSurvivalBot) _live.removeBot(b.playerId);
+  }
   resetSurvivalState();
   // Qpa5f8z (opcode 298) — _live.globalTick, not the bare `globalTick` closure variable;
   // startNewRound is a module-level function, outside startServer's closure that owns that
@@ -9125,22 +9146,30 @@ let SURVIVAL_BOSS_SCALE = S.define({
 // invented ids, unlike the item-pickup mistake — see tickSurvivalItems' own comment on why that
 // matters). A proper "boss skin" might exist in the live CMS catalogue we don't have access to;
 // these are what the client bundle itself references as literal strings.
+// Only ONE confirmed-real skin here now — zombiebot_0 moved to the melee bot archetype below
+// (it's a zombie, that's where it belongs). "Random boss skin" is honestly just this one option
+// until a second real boss-appropriate skin/thumb pair turns up in the bundle.
 const SURVIVAL_BOSS_SKINS = [
   { skinUrl: "https://ev.io/sites/default/files/skins/bot_2.evskin",
     thumbUrl: "https://ev.io/sites/default/files/skin_profile_thumbs/botred110x110.png" },
-  { skinUrl: "https://ev.io/sites/default/files/skins/zombiebot_0.evskin",
-    thumbUrl: "https://ev.io/sites/default/files/skin_profile_thumbs/zombiebot_head_0.png" },
 ];
 const SURVIVAL_BOSS_NAMES = [
   "Behemoth", "Warlord", "Colossus", "Juggernaut", "Devourer", "Ravager", "Titan", "Warbringer",
 ];
+// The real, bundle-confirmed zombie skin — paired with ZOMBIE_MELEE_WEAPON_ID (invisible weapon
+// model) this is what makes melee bots actually look/animate like zombies, not sword-wielders.
+const SURVIVAL_MELEE_BOT_SKIN = {
+  skinUrl: "https://ev.io/sites/default/files/skins/zombiebot_0.evskin",
+  thumbUrl: "https://ev.io/sites/default/files/skin_profile_thumbs/zombiebot_head_0.png",
+};
 
 let SURVIVAL_MELEE_BOT_RATIO = S.define({
-  key: "survivalMeleeBotRatio", env: "EVIO_SURVIVAL_MELEE_BOT_RATIO", type: "number", def: 0.25, min: 0, max: 1, step: 0.05,
+  key: "survivalMeleeBotRatio", env: "EVIO_SURVIVAL_MELEE_BOT_RATIO", type: "number", def: 0.7, min: 0, max: 1, step: 0.05,
   category: "Survival", label: "Melee bot ratio",
-  desc: "Fraction of each newly-spawned survival bot that comes in sword-only instead of "
-      + "gun+sword — confirmed official survival has a distinct melee bot archetype; the exact "
-      + "spawn ratio isn't reverse-engineered from the bundle, this is our own reasonable choice.",
+  desc: "Fraction of each newly-spawned survival bot that's a zombie-skinned melee bot instead "
+      + "of a gun bot — per the user's own live observation, most of an official survival lobby "
+      + "is melee bots, so this defaults high (0.7) rather than the arbitrary 0.25 guessed before "
+      + "that feedback. Still not a reverse-engineered exact ratio.",
 }, (v) => { SURVIVAL_MELEE_BOT_RATIO = v; });
 
 // ── Survival revive ──────────────────────────────────────────────────────────────────────────
@@ -9375,12 +9404,18 @@ function resetSurvivalState() {
 function _forceSurvivalBotWeapon(bot, weaponId) {
   const p = bot.playerState;
   if (!p || p.equippedWeaponId === weaponId) return;
+  p.backupWeaponId = p.equippedWeaponId;
   p.equippedWeaponId = weaponId;
-  p.backupWeaponId = -1;
-  p.weaponList = weaponId === SWORD_WEAPON_ID ? [SWORD_WEAPON_ID] : [weaponId, SWORD_WEAPON_ID];
+  const isMeleeOnly = weaponId === SWORD_WEAPON_ID || weaponId === ZOMBIE_MELEE_WEAPON_ID;
+  p.weaponList = isMeleeOnly ? [weaponId] : [weaponId, SWORD_WEAPON_ID];
   p._ammoGunId = weaponId;
   p.gunAmmo = weaponClip(weaponId, p);
   p.reloadTicks = 0;
+  // Opcode 127/128 (equippedWeaponId/backupWeaponId) are DELTA-emitted — same reliability
+  // mechanism respawnPlayerNow's own weapon-restore uses, so this doesn't rely on a single
+  // packet landing.
+  p.weaponSendCount = WEAPON_SEND_REPEAT_TICKS;
+  startWeaponSwitch(p);
   bot.weaponId = weaponId;
 }
 
@@ -9418,11 +9453,14 @@ function tickSurvivalWaves(sessions) {
     // No flavor names in survival — these are faceless wave fodder, not deathmatch's named bots,
     // and the official client hides them from the scoreboard/kill feed entirely anyway once
     // opcode 237 (isBot) marks them (see buildPeerBootstrapDelta) — a name would never be seen.
-    // A fraction of the pool are melee bots (sword-only, like deathmatch's sword-only mode, but
-    // with Teleport capped at 1 charge instead of 5 — see SURVIVAL_MELEE_BOT_ABILITY_SEED's own
-    // comment) rather than the default gun+sword loadout.
+    // A fraction of the pool (most of it, by default) are zombie melee bots — the real
+    // "Zombie Melee" weapon + zombiebot skin, Teleport capped at 1 charge instead of 5 (see
+    // SURVIVAL_MELEE_BOT_ABILITY_SEED's own comment) — rather than the default gun+sword loadout.
     const meleeBot = Math.random() < SURVIVAL_MELEE_BOT_RATIO;
-    _live.spawnBot({ level: targetLevel, isSurvivalBot: true, name: "Bot", meleeBot });
+    _live.spawnBot({
+      level: targetLevel, isSurvivalBot: true, name: "Bot", meleeBot,
+      ...(meleeBot ? { skinUrl: SURVIVAL_MELEE_BOT_SKIN.skinUrl, thumbUrl: SURVIVAL_MELEE_BOT_SKIN.thumbUrl } : {}),
+    });
   }
   const excess = survivalBots().length - targetCount;
   if (excess > 0) {
@@ -9445,7 +9483,10 @@ function tickSurvivalWaves(sessions) {
   // an ACTIVE weapon-forcing special wave (Rocket/Grenade) overrides a melee bot's sword too,
   // matching "force-equip the bots" applying to every bot, melee or not.
   for (const b of survivalBots()) {
-    const defaultWeapon = b.isSwordBot ? SWORD_WEAPON_ID : 4;
+    // survivalBots() only ever contains survival bots, so isSwordBot=true here always means a
+    // melee bot (the deathmatch sword-bot pool is a separate, excluded set) — its default is the
+    // Zombie Melee weapon, not the sword.
+    const defaultWeapon = b.isSwordBot ? ZOMBIE_MELEE_WEAPON_ID : 4;
     const forcedWeaponId = (survivalState.activeSpecialWave && survivalState.activeSpecialWave.weaponId)
       || defaultWeapon;
     _forceSurvivalBotWeapon(b, forcedWeaponId);
@@ -10816,14 +10857,18 @@ function startServer() {
 
     // A sword bot ALWAYS carries the sword and nothing else — opts.weaponId is ignored for it, the
     // same way SWORD_ONLY overrides everyone's loadout server-wide (this is just that override
-    // applied to one bot instead of the whole lobby).
-    const weaponId = (opts.swordOnly || opts.meleeBot) ? SWORD_WEAPON_ID
+    // applied to one bot instead of the whole lobby). opts.meleeBot is survival's own melee
+    // archetype — the real Zombie Melee weapon (invisible model, no sword in hand — see
+    // ZOMBIE_MELEE_WEAPON_ID's own comment), different (reduced) ability seed below.
+    const weaponId = opts.swordOnly ? SWORD_WEAPON_ID
+      : opts.meleeBot ? ZOMBIE_MELEE_WEAPON_ID
       : (Number.isFinite(opts.weaponId) ? opts.weaponId : (SWORD_ONLY ? SWORD_WEAPON_ID : 4));
     // Mirrors the real join's weapon-equip block (see the join handler) — createPlayerSimState
     // itself sets none of this, so a bot skipping it would carry no weapon at all.
     playerState.equippedWeaponId = weaponId;
     playerState.backupWeaponId = -1;
-    playerState.weaponList = weaponId === 262 ? [262] : [weaponId, 262];
+    playerState.weaponList = (weaponId === 262 || weaponId === ZOMBIE_MELEE_WEAPON_ID)
+      ? [weaponId] : [weaponId, 262];
     playerState.weaponSendCount = 0;
     playerState._ammoGunId = weaponId;
     playerState.gunAmmo = weaponClip(weaponId, playerState);
@@ -11206,7 +11251,12 @@ function startServer() {
       // Ticks remaining to re-splice a live loadout-change delta (RPC 6/7) into this
       // player's tick body, so a mid-match weapon/ability swap applies without respawn.
       loadoutDeltaSendCount: 0,
-      teamId: 0,
+      // Confirmed from the real client bundle: the revive-prompt eligibility scan (Qvwywze) is
+      // PURELY team-based (dead + same Qwhlfg4/teamId as me) — no isBot check at all. Bots stay
+      // on teamId 0 (spawnBot's own default); giving every real player a DIFFERENT team (1) in
+      // survival is what keeps that scan from ever matching a bot or the boss. Harmless in
+      // deathmatch, where nothing reads teamId — stays 0 there, unchanged.
+      teamId: GAME_MODE === "survival" ? 1 : 0,
       tick: globalTick,
       accepted: false,
       lastClientTick: 0,
@@ -11482,7 +11532,7 @@ function startServer() {
               clan: session.clanImgUrl,
               weaponId: session.weaponId,
               abilitySeed: session.abilitySeed,   // opcode 93 + drives computed weaponStats
-              teamId: 0,
+              teamId: session.teamId || 0,
               // THE FIRST PACKET DECIDES THE CLIENT'S STATE FOR THE WHOLE ARRIVAL. At :66963 the
               // client builds its local-player clone as cloneDeep(x) the first time it has one, and
               // the sync that would later correct it sits inside `if (Qgwgj8p.has(x.Qyxhj60))` — and
@@ -12098,6 +12148,7 @@ const serverExports = {
   // sword-only mode (EVIO_SWORD_ONLY=1)
   SWORD_ONLY,
   SWORD_WEAPON_ID,
+  ZOMBIE_MELEE_WEAPON_ID,
   resolveLoadoutWeapon,
   processWeaponSwitch,
   // ammo / reload

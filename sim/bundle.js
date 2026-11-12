@@ -23472,7 +23472,7 @@ var EvioSim = (() => {
   function refreshMagazineCapacity(playerState) {
     if (!playerState) return;
     const nid = playerState._ammoGunId;
-    if (!Number.isFinite(nid) || nid === SWORD_WEAPON_ID2) return;
+    if (!Number.isFinite(nid) || WEAPON_MELEE[nid]) return;
     playerState.gunAmmo = weaponClip(nid, playerState);
     playerState.reloadTicks = 0;
   }
@@ -23561,7 +23561,7 @@ var EvioSim = (() => {
     }));
   }
   function _advanceWeaponSlotTracking(p2) {
-    const curWeaponIds = Array.isArray(p2.weaponList) ? p2.weaponList.filter((w2) => w2 !== SWORD_WEAPON_ID2) : [];
+    const curWeaponIds = Array.isArray(p2.weaponList) ? p2.weaponList.filter((w2) => !WEAPON_MELEE[w2]) : [];
     const prevWeaponIds = Array.isArray(p2._prevEmitWeaponIds) ? p2._prevEmitWeaponIds : [];
     if (!p2._weaponSlotRemovalRepeat) p2._weaponSlotRemovalRepeat = /* @__PURE__ */ new Map();
     for (const oldId of prevWeaponIds) {
@@ -23763,6 +23763,7 @@ var EvioSim = (() => {
     return set2;
   })();
   var SWORD_WEAPON_ID2 = 262;
+  var ZOMBIE_MELEE_WEAPON_ID = 343;
   var SWORD_ONLY = define({
     key: "swordOnly",
     env: "EVIO_SWORD_ONLY",
@@ -25461,6 +25462,7 @@ var EvioSim = (() => {
     p2.ticksSinceDamage = (p2.ticksSinceDamage || 0) + 1;
     p2.ticksSinceKill = (p2.ticksSinceKill || 0) + 1;
     if (p2.deathStateTimer > 0) return;
+    if (GAME_MODE === "survival") return;
     if (p2.ticksSinceKill === REGEN_AFTER_KILL_TICKS) p2.forceRegen = true;
     const max = 1;
     const byTimer = p2.ticksSinceDamage > REGEN_DELAY && REGEN_ENABLED;
@@ -26391,7 +26393,7 @@ var EvioSim = (() => {
       if (!s2 || !s2.accepted || s2 === session) continue;
       const e2 = s2.playerState;
       if (!e2 || !e2.position || e2.deathStateTimer > 0 || e2.healthPoints <= 0) continue;
-      if (e2.equippedWeaponId === SWORD_WEAPON_ID2) continue;
+      if (WEAPON_MELEE[e2.equippedWeaponId]) continue;
       const eEyeY = e2.crouching ? CROUCH_EYE_Y : STAND_EYE_Y;
       const ex = e2.position.x, ey = e2.position.y + eEyeY, ez = e2.position.z;
       const dx = myEye.x - ex, dy = myEye.y - ey, dz = myEye.z - ez;
@@ -26475,7 +26477,7 @@ var EvioSim = (() => {
     const hpFraction = Number.isFinite(p2.healthPoints) ? p2.healthPoints : 1;
     const wounded = hpFraction <= SWORD_LOW_HP_FRACTION;
     const targetPs = target.session && target.session.playerState;
-    const targetIsGunUser = !!targetPs && targetPs.equippedWeaponId !== SWORD_WEAPON_ID2;
+    const targetIsGunUser = !!targetPs && !WEAPON_MELEE[targetPs.equippedWeaponId];
     const { lookDelta: aimLook, fire: aimFire } = _aimAndFire(session, curve, target, TICK_MS / 1e3, tick);
     let lookDelta = aimLook;
     const fire = aimFire && dist <= SWORD_MELEE_RANGE;
@@ -27716,7 +27718,7 @@ var EvioSim = (() => {
     body.push(130, playerState.reloadTicks > 0 ? playerState.reloadTicks : -1);
     const _gunId = held ? null : playerState._ammoGunId;
     if (!held) {
-      const weaponIds = (Array.isArray(playerState.weaponList) ? playerState.weaponList : []).filter((w2) => w2 !== SWORD_WEAPON_ID2);
+      const weaponIds = (Array.isArray(playerState.weaponList) ? playerState.weaponList : []).filter((w2) => !WEAPON_MELEE[w2]);
       if (playerState._weaponSlotRemovalRepeat) {
         for (const [oldId] of playerState._weaponSlotRemovalRepeat) {
           if (!weaponIds.includes(oldId)) body.push(135, -1, oldId);
@@ -28540,6 +28542,9 @@ var EvioSim = (() => {
     resetMatchTimer();
     respawnAll(sessions);
     for (const s2 of sessions.values()) if (s2) s2.survivalOut = false;
+    if (_live.listBots && _live.removeBot) {
+      for (const b2 of _live.listBots()) if (b2.isSurvivalBot) _live.removeBot(b2.playerId);
+    }
     resetSurvivalState();
     match.roundStartTick = _live.globalTick;
     clearAllEntities("round start");
@@ -29001,10 +29006,6 @@ var EvioSim = (() => {
     {
       skinUrl: "https://ev.io/sites/default/files/skins/bot_2.evskin",
       thumbUrl: "https://ev.io/sites/default/files/skin_profile_thumbs/botred110x110.png"
-    },
-    {
-      skinUrl: "https://ev.io/sites/default/files/skins/zombiebot_0.evskin",
-      thumbUrl: "https://ev.io/sites/default/files/skin_profile_thumbs/zombiebot_head_0.png"
     }
   ];
   var SURVIVAL_BOSS_NAMES = [
@@ -29017,17 +29018,21 @@ var EvioSim = (() => {
     "Titan",
     "Warbringer"
   ];
+  var SURVIVAL_MELEE_BOT_SKIN = {
+    skinUrl: "https://ev.io/sites/default/files/skins/zombiebot_0.evskin",
+    thumbUrl: "https://ev.io/sites/default/files/skin_profile_thumbs/zombiebot_head_0.png"
+  };
   var SURVIVAL_MELEE_BOT_RATIO = define({
     key: "survivalMeleeBotRatio",
     env: "EVIO_SURVIVAL_MELEE_BOT_RATIO",
     type: "number",
-    def: 0.25,
+    def: 0.7,
     min: 0,
     max: 1,
     step: 0.05,
     category: "Survival",
     label: "Melee bot ratio",
-    desc: "Fraction of each newly-spawned survival bot that comes in sword-only instead of gun+sword \u2014 confirmed official survival has a distinct melee bot archetype; the exact spawn ratio isn't reverse-engineered from the bundle, this is our own reasonable choice."
+    desc: "Fraction of each newly-spawned survival bot that's a zombie-skinned melee bot instead of a gun bot \u2014 per the user's own live observation, most of an official survival lobby is melee bots, so this defaults high (0.7) rather than the arbitrary 0.25 guessed before that feedback. Still not a reverse-engineered exact ratio."
   }, (v2) => {
     SURVIVAL_MELEE_BOT_RATIO = v2;
   });
@@ -29259,12 +29264,15 @@ var EvioSim = (() => {
   function _forceSurvivalBotWeapon(bot, weaponId) {
     const p2 = bot.playerState;
     if (!p2 || p2.equippedWeaponId === weaponId) return;
+    p2.backupWeaponId = p2.equippedWeaponId;
     p2.equippedWeaponId = weaponId;
-    p2.backupWeaponId = -1;
-    p2.weaponList = weaponId === SWORD_WEAPON_ID2 ? [SWORD_WEAPON_ID2] : [weaponId, SWORD_WEAPON_ID2];
+    const isMeleeOnly = weaponId === SWORD_WEAPON_ID2 || weaponId === ZOMBIE_MELEE_WEAPON_ID;
+    p2.weaponList = isMeleeOnly ? [weaponId] : [weaponId, SWORD_WEAPON_ID2];
     p2._ammoGunId = weaponId;
     p2.gunAmmo = weaponClip(weaponId, p2);
     p2.reloadTicks = 0;
+    p2.weaponSendCount = WEAPON_SEND_REPEAT_TICKS;
+    startWeaponSwitch(p2);
     bot.weaponId = weaponId;
   }
   function survivalWaveNumber(tick) {
@@ -29284,7 +29292,13 @@ var EvioSim = (() => {
     const targetLevel = Math.min(10, 5 + Math.floor(Math.max(0, wave - 1) / SURVIVAL_LEVEL_UP_EVERY_N_WAVES));
     while (survivalBots().length < targetCount) {
       const meleeBot = Math.random() < SURVIVAL_MELEE_BOT_RATIO;
-      _live.spawnBot({ level: targetLevel, isSurvivalBot: true, name: "Bot", meleeBot });
+      _live.spawnBot({
+        level: targetLevel,
+        isSurvivalBot: true,
+        name: "Bot",
+        meleeBot,
+        ...meleeBot ? { skinUrl: SURVIVAL_MELEE_BOT_SKIN.skinUrl, thumbUrl: SURVIVAL_MELEE_BOT_SKIN.thumbUrl } : {}
+      });
     }
     const excess = survivalBots().length - targetCount;
     if (excess > 0) {
@@ -29293,7 +29307,7 @@ var EvioSim = (() => {
     for (const b2 of survivalBots()) b2.botLevel = targetLevel;
     survivalState.activeSpecialWave = wave >= 1 && Math.random() < SURVIVAL_SPECIAL_WAVE_CHANCE ? pickSpecialWaveType() : null;
     for (const b2 of survivalBots()) {
-      const defaultWeapon = b2.isSwordBot ? SWORD_WEAPON_ID2 : 4;
+      const defaultWeapon = b2.isSwordBot ? ZOMBIE_MELEE_WEAPON_ID : 4;
       const forcedWeaponId = survivalState.activeSpecialWave && survivalState.activeSpecialWave.weaponId || defaultWeapon;
       _forceSurvivalBotWeapon(b2, forcedWeaponId);
     }
@@ -30235,10 +30249,10 @@ var EvioSim = (() => {
         yaw: sp2.yaw * Math.PI / 180
       }, sessionId);
       playerState._holdForPlay = false;
-      const weaponId = opts.swordOnly || opts.meleeBot ? SWORD_WEAPON_ID2 : Number.isFinite(opts.weaponId) ? opts.weaponId : SWORD_ONLY ? SWORD_WEAPON_ID2 : 4;
+      const weaponId = opts.swordOnly ? SWORD_WEAPON_ID2 : opts.meleeBot ? ZOMBIE_MELEE_WEAPON_ID : Number.isFinite(opts.weaponId) ? opts.weaponId : SWORD_ONLY ? SWORD_WEAPON_ID2 : 4;
       playerState.equippedWeaponId = weaponId;
       playerState.backupWeaponId = -1;
-      playerState.weaponList = weaponId === 262 ? [262] : [weaponId, 262];
+      playerState.weaponList = weaponId === 262 || weaponId === ZOMBIE_MELEE_WEAPON_ID ? [weaponId] : [weaponId, 262];
       playerState.weaponSendCount = 0;
       playerState._ammoGunId = weaponId;
       playerState.gunAmmo = weaponClip(weaponId, playerState);
@@ -30550,7 +30564,12 @@ var EvioSim = (() => {
         // Ticks remaining to re-splice a live loadout-change delta (RPC 6/7) into this
         // player's tick body, so a mid-match weapon/ability swap applies without respawn.
         loadoutDeltaSendCount: 0,
-        teamId: 0,
+        // Confirmed from the real client bundle: the revive-prompt eligibility scan (Qvwywze) is
+        // PURELY team-based (dead + same Qwhlfg4/teamId as me) — no isBot check at all. Bots stay
+        // on teamId 0 (spawnBot's own default); giving every real player a DIFFERENT team (1) in
+        // survival is what keeps that scan from ever matching a bot or the boss. Harmless in
+        // deathmatch, where nothing reads teamId — stays 0 there, unchanged.
+        teamId: GAME_MODE === "survival" ? 1 : 0,
         tick: globalTick,
         accepted: false,
         lastClientTick: 0,
@@ -30746,7 +30765,7 @@ var EvioSim = (() => {
                 weaponId: session.weaponId,
                 abilitySeed: session.abilitySeed,
                 // opcode 93 + drives computed weaponStats
-                teamId: 0,
+                teamId: session.teamId || 0,
                 // THE FIRST PACKET DECIDES THE CLIENT'S STATE FOR THE WHOLE ARRIVAL. At :66963 the
                 // client builds its local-player clone as cloneDeep(x) the first time it has one, and
                 // the sync that would later correct it sits inside `if (Qgwgj8p.has(x.Qyxhj60))` — and
@@ -31202,6 +31221,7 @@ var EvioSim = (() => {
     // sword-only mode (EVIO_SWORD_ONLY=1)
     SWORD_ONLY,
     SWORD_WEAPON_ID: SWORD_WEAPON_ID2,
+    ZOMBIE_MELEE_WEAPON_ID,
     resolveLoadoutWeapon,
     processWeaponSwitch,
     // ammo / reload
