@@ -19777,8 +19777,13 @@ var EvioSim = (() => {
       // false for every entity, bot or not, which is why neither ever worked.
       237,
       !!options.isBot,
+      // 238 Qyamlj — overloaded by the real client: for a plain bot it's the "lvl N" scoreboard
+      // badge; for a BOSS specifically it's instead read as a reward amount for the
+      // "{boss} spawned with {N}e reward" chat line. Same wire slot, different meaning picked by
+      // the isBoss flag (239) on the SAME entity — not a bug, confirmed from the real bundle (both
+      // reads are literally `entity.Qyamlj`, just in two different call sites keyed on Qqw6dra).
       238,
-      1,
+      options.isBoss ? Number.isFinite(options.bossReward) ? options.bossReward : 500 : Number.isFinite(options.botLevel) ? options.botLevel : 1,
       // 239 Qqw6dra = isBoss. Drives the "Kill the boss!" HUD text and the boss HP-bar overlay —
       // also hardcoded false before.
       239,
@@ -23539,9 +23544,16 @@ var EvioSim = (() => {
   function _randomPickupWeapon() {
     return PICKUP_WEAPON_IDS[Math.floor(Math.random() * PICKUP_WEAPON_IDS.length)];
   }
+  function _rollPickupTier() {
+    return GAME_MODE === "survival" ? pickWeightedTier() : 1;
+  }
   var _pickupState = [];
   function _resetPickupState() {
-    _pickupState = (physics_world_default.pickupPoints || []).map(() => ({ weaponTypeId: _randomPickupWeapon(), availableAtTick: 0 }));
+    _pickupState = (physics_world_default.pickupPoints || []).map(() => ({
+      weaponTypeId: _randomPickupWeapon(),
+      tier: _rollPickupTier(),
+      availableAtTick: 0
+    }));
   }
   function _advanceWeaponSlotTracking(p2) {
     const curWeaponIds = Array.isArray(p2.weaponList) ? p2.weaponList.filter((w2) => w2 !== SWORD_WEAPON_ID2) : [];
@@ -23648,6 +23660,7 @@ var EvioSim = (() => {
         if (dist > PICKUP_RADIUS) continue;
         _grantPickupWeapon(p2, st2.weaponTypeId, !!s2.isBot);
         st2.weaponTypeId = _randomPickupWeapon();
+        st2.tier = _rollPickupTier();
         st2.availableAtTick = tick + PICKUP_RESPAWN_TICKS;
         break;
       }
@@ -23662,7 +23675,8 @@ var EvioSim = (() => {
     for (let i2 = 0; i2 < _pickupState.length; i2++) {
       const st2 = _pickupState[i2];
       const hidden = now < st2.availableAtTick;
-      block.push(278, i2, 270, i2, 271, st2.weaponTypeId, 273, hidden ? PICKUP_HIDE_SENTINEL : 0, 274, 0, 275, null);
+      const glowIndex = SURVIVAL_TIER_GLOW_INDEX[(st2.tier || 1) - 1] ?? 0;
+      block.push(278, i2, 270, i2, 271, st2.weaponTypeId, 273, hidden ? PICKUP_HIDE_SENTINEL : 0, 274, glowIndex, 275, null);
     }
     return block;
   }
@@ -24650,6 +24664,7 @@ var EvioSim = (() => {
   function simulateGrenades(dt2, sessions) {
     enforceEntityCap();
     for (const [key, g2] of activeEntities) {
+      if (g2.isSurvivalItem) continue;
       try {
         if (g2._catchUp > 0) {
           const extra = g2._catchUp;
@@ -26569,11 +26584,76 @@ var EvioSim = (() => {
       }
       if (p2.deathStateTimer <= 0) continue;
       p2.deathStateTimer += 1;
-      if (p2.deathStateTimer > RESPAWN_TICKS) {
-        if (GAME_MODE === "survival" && !s2.isBot) s2.survivalOut = true;
-        else respawnPlayerNow(p2);
+      if (GAME_MODE === "survival" && !s2.isBot) {
+        if (p2.deathStateTimer > SURVIVAL_BLEEDOUT_TICKS) s2.survivalOut = true;
+      } else if (p2.deathStateTimer > RESPAWN_TICKS) {
+        respawnPlayerNow(p2);
       }
     }
+  }
+  function tickSurvivalRevives(sessions) {
+    const survival = GAME_MODE === "survival";
+    for (const s2 of sessions.values()) {
+      if (!s2 || !s2.accepted || s2.isBot) continue;
+      const p2 = s2.playerState;
+      if (!p2) continue;
+      if (!survival) {
+        if (p2.reviveTargetId !== -1) p2.reviveTargetId = -1;
+        if (p2.reviveHoldTicks !== 0) p2.reviveHoldTicks = 0;
+        continue;
+      }
+      if (p2.deathStateTimer > 0 || p2.healthPoints <= 0 || s2.survivalOut) {
+        p2.reviveTargetId = -1;
+        p2.reviveHoldTicks = 0;
+        continue;
+      }
+      let target = null;
+      if (p2.reviveTargetId !== -1) {
+        const cur = sessions.get(p2.reviveTargetId);
+        if (cur && cur.accepted && !cur.isBot && !cur.survivalOut && cur.playerState && cur.playerState.deathStateTimer > 0 && _distance(p2.position, cur.playerState.position) <= SURVIVAL_REVIVE_RANGE) {
+          target = cur;
+        }
+      }
+      if (!target) {
+        let best = null, bestDist = Infinity;
+        for (const other of sessions.values()) {
+          if (!other || other === s2 || other.isBot || !other.accepted || other.survivalOut) continue;
+          const op2 = other.playerState;
+          if (!op2 || op2.deathStateTimer <= 0) continue;
+          const d2 = _distance(p2.position, op2.position);
+          if (d2 <= SURVIVAL_REVIVE_RANGE && d2 < bestDist) {
+            best = other;
+            bestDist = d2;
+          }
+        }
+        if (best) {
+          target = best;
+          p2.reviveTargetId = best.playerId;
+          p2.reviveHoldTicks = 0;
+        }
+      }
+      if (!target) {
+        p2.reviveTargetId = -1;
+        p2.reviveHoldTicks = 0;
+        continue;
+      }
+      p2.reviveHoldTicks += 1;
+      if (p2.reviveHoldTicks < SURVIVAL_RESURRECTION_TICKS) continue;
+      const tp2 = target.playerState;
+      if (tp2 && tp2.deathStateTimer > 0 && !target.survivalOut) {
+        tp2.deathStateTimer = 0;
+        tp2.healthPoints = SURVIVAL_REVIVE_HEAL;
+        tp2.armorPoints = 0;
+        console.log(`[evio-local] survival: ${s2.displayName} revived ${target.displayName}`);
+      }
+      p2.healthPoints = Math.min(1, p2.healthPoints + SURVIVAL_REVIVER_HEAL_REWARD);
+      p2.reviveTargetId = -1;
+      p2.reviveHoldTicks = 0;
+    }
+  }
+  function _distance(a2, b2) {
+    if (!a2 || !b2) return Infinity;
+    return Math.hypot(a2.x - b2.x, a2.y - b2.y, a2.z - b2.z);
   }
   function respawnPlayerNow(p2) {
     {
@@ -26672,6 +26752,10 @@ var EvioSim = (() => {
       // absorbs damage before health
       deathStateTimer: 0,
       // 0 = alive; >0 counts up while dead until respawn
+      // Survival revive (opcodes 200/201, Qqrmhn0/Q4vkuy3). -1 = not currently reviving anyone.
+      // See tickSurvivalRevives — meaningless/always -1,0 outside survival.
+      reviveTargetId: -1,
+      reviveHoldTicks: 0,
       fireCooldown: 0,
       // ticks until the weapon can fire again
       spawnSeed: 0,
@@ -27834,6 +27918,13 @@ var EvioSim = (() => {
       // runs for our colliderless server-spawned grenade).
       198,
       Math.max(0, Number.isFinite(playerState.energyCharge) ? playerState.energyCharge : 0),
+      // 200 Qqrmhn0 (who this player is reviving, -1 = nobody) / 201 Q4vkuy3 (ticks held reviving
+      // them) — survival's revive mechanic. See tickSurvivalRevives. Harmless outside survival:
+      // always -1/0 there, so the client's revive-progress UI never has anything to show.
+      200,
+      Number.isFinite(playerState.reviveTargetId) ? playerState.reviveTargetId : -1,
+      201,
+      Number.isFinite(playerState.reviveHoldTicks) ? playerState.reviveHoldTicks : 0,
       // 207 isThirdPerson: kept FALSE. (isThirdPerson would push a DEAD player into the spectator branch
       // (:53201) instead of the alive=4 killcam else-branch, and is meant for a manual 3rd-person toggle.)
       207,
@@ -27925,6 +28016,7 @@ var EvioSim = (() => {
     }
     body.push(280, ROUNDS_ENABLED ? match.gameMode : GAME_PHASE);
     body.push(298, match.roundStartTick);
+    body.push(306, GAME_MODE === "survival" && survivalState.activeSpecialWave ? survivalState.activeSpecialWave.name : null);
     if (match.teleporterUseTicks.length) body.push(308, match.teleporterUseTicks);
     return body;
   }
@@ -27964,6 +28056,9 @@ var EvioSim = (() => {
       // peer-introduction builder, not duplicated per call site.
       isBot: !!peer.isBot,
       isBoss: !!peer.isBoss,
+      // 238 — see state_builder.js's own comment on the dual bot-level/boss-reward meaning.
+      botLevel: peer.botLevel,
+      bossReward: SURVIVAL_BOSS_REWARD,
       // Opcode 235 = clan insignia image. This was MISSING, which is why a player saw their OWN clan
       // logo but never a peer's: the avatar is a PROP (the ~3 roster covers every session) whereas
       // the clan image is a per-ENTITY opcode, and it was only ever filled in for the local player's
@@ -28841,9 +28936,252 @@ var EvioSim = (() => {
   }, (v2) => {
     SURVIVAL_BOSS_DAMAGE_RESIST = v2;
   });
-  var survivalState = { currentWave: -1, bossPlayerId: null };
+  var SURVIVAL_BOSS_REWARD = define({
+    key: "survivalBossReward",
+    env: "EVIO_SURVIVAL_BOSS_REWARD",
+    type: "int",
+    def: 500,
+    min: 0,
+    max: 1e5,
+    category: "Survival",
+    label: "Boss kill reward (display only)",
+    desc: `The number shown in "{boss} spawned with {N}e reward" (opcode 238, overloaded with the normal bot-level badge \u2014 see state_builder.js). Cosmetic only \u2014 this project has no currency/wallet system of its own, so nothing is actually granted; it's purely the chat-announcement number the real client expects to see.`
+  }, (v2) => {
+    SURVIVAL_BOSS_REWARD = v2;
+  });
+  var SURVIVAL_RESURRECTION_TICKS = define({
+    key: "survivalResurrectionTicks",
+    env: "EVIO_SURVIVAL_RESURRECTION_TICKS",
+    type: "int",
+    def: 200,
+    min: 20,
+    max: 2e3,
+    category: "Survival",
+    label: "Revive duration (ticks)",
+    desc: "How long a nearby teammate must stay in range to complete a revive. 200 = 10s at 20Hz, matching official survival's own resurrectionTime constant."
+  }, (v2) => {
+    SURVIVAL_RESURRECTION_TICKS = v2;
+  });
+  var SURVIVAL_REVIVE_RANGE = define({
+    key: "survivalReviveRange",
+    env: "EVIO_SURVIVAL_REVIVE_RANGE",
+    type: "number",
+    def: 5,
+    min: 1,
+    max: 20,
+    step: 0.5,
+    category: "Survival",
+    label: "Revive range (u)",
+    desc: "Max distance to a downed teammate that still counts as reviving them. 5 matches official survival's own Qd9jbxq constant."
+  }, (v2) => {
+    SURVIVAL_REVIVE_RANGE = v2;
+  });
+  var SURVIVAL_BLEEDOUT_TICKS = define({
+    key: "survivalBleedoutTicks",
+    env: "EVIO_SURVIVAL_BLEEDOUT_TICKS",
+    type: "int",
+    def: 400,
+    min: 20,
+    max: 6e3,
+    category: "Survival",
+    label: "Bleed-out window (ticks)",
+    desc: "How long a downed player can still be revived before they're finalized as OUT for the round (no official source confirms this exact number \u2014 picked to give teammates a real chance without letting one down player stall the round forever). 400 = 20s at 20Hz."
+  }, (v2) => {
+    SURVIVAL_BLEEDOUT_TICKS = v2;
+  });
+  var SURVIVAL_REVIVE_HEAL = define({
+    key: "survivalReviveHeal",
+    env: "EVIO_SURVIVAL_REVIVE_HEAL",
+    type: "number",
+    def: 0.5,
+    min: 0.05,
+    max: 1,
+    step: 0.05,
+    category: "Survival",
+    label: "Health on revival",
+    desc: "Fraction of max health a revived player comes back with (the real client's own revive code only shows the REVIVER's own +25% reward explicitly \u2014 the revived player's own restored health isn't visible in client-predicted code, so this is our own choice)."
+  }, (v2) => {
+    SURVIVAL_REVIVE_HEAL = v2;
+  });
+  var SURVIVAL_REVIVER_HEAL_REWARD = define({
+    key: "survivalReviverHealReward",
+    env: "EVIO_SURVIVAL_REVIVER_HEAL_REWARD",
+    type: "number",
+    def: 0.25,
+    min: 0,
+    max: 1,
+    step: 0.05,
+    category: "Survival",
+    label: "Reviver's own health reward",
+    desc: "Fraction of health the REVIVER gains on completing a revive \u2014 confirmed directly from the real client bundle (r.Qq7zdfv=Math.min(r.Qq7zdfv+.25,1))."
+  }, (v2) => {
+    SURVIVAL_REVIVER_HEAL_REWARD = v2;
+  });
+  var SPECIAL_WAVE_TYPES = [
+    { name: "Rocket Wave", weight: 1, minWave: 5, weaponId: 8 },
+    // Rocket Launcher
+    { name: "Grenade Wave", weight: 1, minWave: 5, weaponId: 283 },
+    // Grenade Launcher
+    { name: "Teleporters", weight: 3, minWave: 5, weaponId: null },
+    // no forced weapon — environmental
+    { name: "Smoke Wave", weight: 1, minWave: 5, weaponId: null }
+    // no forced weapon — environmental
+  ];
+  var SURVIVAL_SPECIAL_WAVE_CHANCE = define({
+    key: "survivalSpecialWaveChance",
+    env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE",
+    type: "number",
+    def: 0.3,
+    min: 0,
+    max: 1,
+    step: 0.05,
+    category: "Survival",
+    label: "Special wave chance (per eligible wave)",
+    desc: "Odds a NEW wave (past minWave=5) rolls as a special wave instead of a normal one. The real client's own exact trigger cadence couldn't be confirmed from bundle analysis \u2014 this is our own reasonable choice, not a reverse-engineered constant."
+  }, (v2) => {
+    SURVIVAL_SPECIAL_WAVE_CHANCE = v2;
+  });
+  function pickSpecialWaveType() {
+    const total = SPECIAL_WAVE_TYPES.reduce((sum, w2) => sum + w2.weight, 0);
+    let roll = Math.random() * total;
+    for (const w2 of SPECIAL_WAVE_TYPES) {
+      if (roll < w2.weight) return w2;
+      roll -= w2.weight;
+    }
+    return SPECIAL_WAVE_TYPES[0];
+  }
+  var SURVIVAL_TIER_WEIGHTS = [1, 0.7, 0.4, 0.2];
+  var SURVIVAL_TIER_GLOW_INDEX = [0, 2, 3, 4];
+  function pickWeightedTier() {
+    const total = SURVIVAL_TIER_WEIGHTS.reduce((a2, b2) => a2 + b2, 0);
+    let roll = Math.random() * total;
+    for (let i2 = 0; i2 < SURVIVAL_TIER_WEIGHTS.length; i2++) {
+      if (roll < SURVIVAL_TIER_WEIGHTS[i2]) return i2 + 1;
+      roll -= SURVIVAL_TIER_WEIGHTS[i2];
+    }
+    return 1;
+  }
+  var SURVIVAL_ITEM_TYPE = { HEALTH: 9001, ARMOR: 9002 };
+  var SURVIVAL_ITEM_SPAWN_TICKS = define({
+    key: "survivalItemSpawnTicks",
+    env: "EVIO_SURVIVAL_ITEM_SPAWN_TICKS",
+    type: "int",
+    def: 300,
+    min: 20,
+    max: 6e3,
+    category: "Survival",
+    label: "Item spawn interval (ticks)",
+    desc: "How often a new health/armor kit appears (while under the max below). 300 = 15s at 20Hz."
+  }, (v2) => {
+    SURVIVAL_ITEM_SPAWN_TICKS = v2;
+  });
+  var SURVIVAL_MAX_ITEMS = define({
+    key: "survivalMaxItems",
+    env: "EVIO_SURVIVAL_MAX_ITEMS",
+    type: "int",
+    def: 3,
+    min: 0,
+    max: 20,
+    category: "Survival",
+    label: "Max items on the ground at once"
+  }, (v2) => {
+    SURVIVAL_MAX_ITEMS = v2;
+  });
+  var SURVIVAL_HEALTH_KIT_HEAL = define({
+    key: "survivalHealthKitHeal",
+    env: "EVIO_SURVIVAL_HEALTH_KIT_HEAL",
+    type: "number",
+    def: 0.5,
+    min: 0.05,
+    max: 1,
+    step: 0.05,
+    category: "Survival",
+    label: "Health Kit heal amount",
+    desc: "Confirmed from the real client's own item catalogue (Health Kit: .5 = 50%)."
+  }, (v2) => {
+    SURVIVAL_HEALTH_KIT_HEAL = v2;
+  });
+  var SURVIVAL_ARMOR_KIT_AMOUNT = define({
+    key: "survivalArmorKitAmount",
+    env: "EVIO_SURVIVAL_ARMOR_KIT_AMOUNT",
+    type: "number",
+    def: 0.25,
+    min: 0.05,
+    max: 1,
+    step: 0.05,
+    category: "Survival",
+    label: "Armor Kit amount",
+    desc: "Confirmed from the real client's own item catalogue (Armor: .25 = 25%)."
+  }, (v2) => {
+    SURVIVAL_ARMOR_KIT_AMOUNT = v2;
+  });
+  var _survivalLastItemSpawnTick = 0;
+  function spawnSurvivalItem() {
+    const pts = physics_world_default.pickupPoints || [];
+    if (!pts.length) return;
+    const pt2 = pts[Math.floor(Math.random() * pts.length)];
+    const isHealth = Math.random() < 0.5;
+    const key = ++_entityCounter;
+    activeEntities.set(key, {
+      sessionId: key,
+      ownerSid: null,
+      pos: { x: pt2.x, y: pt2.y, z: pt2.z },
+      vel: { x: 0, y: 0, z: 0 },
+      // stationary — not thrown, just sitting on the ground
+      type: isHealth ? SURVIVAL_ITEM_TYPE.HEALTH : SURVIVAL_ITEM_TYPE.ARMOR,
+      numberProp: 0,
+      spawnTick: 0,
+      _bornTick: _live.globalTick || 0,
+      fuse: Infinity,
+      // never auto-expires — only removed by pickup or round reset
+      isStuck: 0,
+      qt6bqft: null,
+      // must be explicit — see buildActiveEntityBlock's own comment
+      isSurvivalItem: true
+      // marks this for tickSurvivalItems' own proximity sweep
+    });
+  }
+  function tickSurvivalItems(sessions) {
+    if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
+    const tick = _live.globalTick || 0;
+    let liveItemCount = 0;
+    for (const g2 of activeEntities.values()) if (g2.isSurvivalItem) liveItemCount++;
+    if (tick - _survivalLastItemSpawnTick >= SURVIVAL_ITEM_SPAWN_TICKS && liveItemCount < SURVIVAL_MAX_ITEMS) {
+      _survivalLastItemSpawnTick = tick;
+      spawnSurvivalItem();
+    }
+    for (const [key, g2] of activeEntities) {
+      if (!g2.isSurvivalItem) continue;
+      for (const s2 of sessions.values()) {
+        if (!s2 || !s2.accepted) continue;
+        const p2 = s2.playerState;
+        if (!p2 || !p2.position || p2._holdForPlay || p2.deathStateTimer > 0 || p2.healthPoints <= 0) continue;
+        if (_distance(p2.position, g2.pos) > PICKUP_RADIUS) continue;
+        if (g2.type === SURVIVAL_ITEM_TYPE.HEALTH) {
+          p2.healthPoints = Math.min(1, p2.healthPoints + SURVIVAL_HEALTH_KIT_HEAL);
+        } else {
+          p2.armorPoints = Math.min(1, p2.armorPoints + SURVIVAL_ARMOR_KIT_AMOUNT);
+        }
+        activeEntities.delete(key);
+        removedEntityKeys.push(key);
+        break;
+      }
+    }
+  }
+  var survivalState = { currentWave: -1, bossPlayerId: null, activeSpecialWave: null };
   function resetSurvivalState() {
-    survivalState = { currentWave: -1, bossPlayerId: null };
+    survivalState = { currentWave: -1, bossPlayerId: null, activeSpecialWave: null };
+  }
+  function _forceSurvivalBotWeapon(bot, weaponId) {
+    const p2 = bot.playerState;
+    if (!p2 || p2.equippedWeaponId === weaponId) return;
+    p2.equippedWeaponId = weaponId;
+    p2.backupWeaponId = -1;
+    p2.weaponList = weaponId === SWORD_WEAPON_ID2 ? [SWORD_WEAPON_ID2] : [weaponId, SWORD_WEAPON_ID2];
+    p2._ammoGunId = weaponId;
+    p2.gunAmmo = weaponClip(weaponId, p2);
+    p2.reloadTicks = 0;
+    bot.weaponId = weaponId;
   }
   function survivalWaveNumber(tick) {
     return Math.floor((tick - match.roundStartTick - SURVIVAL_START_DELAY_TICKS) / SURVIVAL_WAVE_TICKS);
@@ -28868,6 +29206,12 @@ var EvioSim = (() => {
       for (const b2 of survivalBots().slice(targetCount)) _live.removeBot(b2.playerId);
     }
     for (const b2 of survivalBots()) b2.botLevel = targetLevel;
+    survivalState.activeSpecialWave = wave >= 1 && Math.random() < SURVIVAL_SPECIAL_WAVE_CHANCE ? pickSpecialWaveType() : null;
+    const forcedWeaponId = survivalState.activeSpecialWave && survivalState.activeSpecialWave.weaponId || 4;
+    for (const b2 of survivalBots()) _forceSurvivalBotWeapon(b2, forcedWeaponId);
+    if (survivalState.activeSpecialWave) {
+      console.log(`[evio-local] survival: wave ${wave} special wave \u2014 ${survivalState.activeSpecialWave.name}`);
+    }
     if (wave >= 1 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
       const bossAlive = survivalState.bossPlayerId && sessions.get(survivalState.bossPlayerId);
       if (!bossAlive) {
@@ -29415,8 +29759,10 @@ var EvioSim = (() => {
         for (const s2 of sessions.values()) if (s2.accepted && s2.playerState) tickHealthRegen(s2.playerState);
       });
       _phase("deathRespawn", () => processDeathRespawn(sessions));
+      _phase("survivalRevives", () => tickSurvivalRevives(sessions));
       _phase("match", () => tickMatch(sessions));
       _phase("survivalWaves", () => tickSurvivalWaves(sessions));
+      _phase("survivalItems", () => tickSurvivalItems(sessions));
       _phase("peerSmoothing", () => {
         for (const s2 of sessions.values()) {
           if (!s2.accepted || !s2.playerState) continue;
@@ -29482,6 +29828,8 @@ var EvioSim = (() => {
               roundStartTick: match.roundStartTick,
               isBot: !!s2.isBot,
               isBoss: !!s2.isBoss,
+              botLevel: s2.botLevel,
+              bossReward: SURVIVAL_BOSS_REWARD,
               officialBootstrapFields: OFFICIAL_BOOTSTRAP_FIELDS,
               customMap: true,
               matchTimer: match.timer,
@@ -30723,6 +31071,12 @@ var EvioSim = (() => {
     // the object directly, because resetSurvivalState REPLACES survivalState wholesale (same
     // reasoning as getSessions()/getParityRings() above for other reassignable module state).
     tickSurvivalWaves,
+    tickSurvivalRevives,
+    tickSurvivalItems,
+    spawnSurvivalItem,
+    pickWeightedTier,
+    SURVIVAL_TIER_GLOW_INDEX,
+    SPECIAL_WAVE_TYPES,
     getSurvivalState: () => survivalState,
     handleClientSignal,
     creditKill,

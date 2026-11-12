@@ -365,7 +365,13 @@ function buildFirstSpawnBody(options = {}) {
     // survival mode comment in local_ws_server.js's buildPeerBootstrapDelta). Was hardcoded
     // false for every entity, bot or not, which is why neither ever worked.
     237, !!options.isBot,
-    238, 1,
+    // 238 Qyamlj — overloaded by the real client: for a plain bot it's the "lvl N" scoreboard
+    // badge; for a BOSS specifically it's instead read as a reward amount for the
+    // "{boss} spawned with {N}e reward" chat line. Same wire slot, different meaning picked by
+    // the isBoss flag (239) on the SAME entity — not a bug, confirmed from the real bundle (both
+    // reads are literally `entity.Qyamlj`, just in two different call sites keyed on Qqw6dra).
+    238, options.isBoss ? (Number.isFinite(options.bossReward) ? options.bossReward : 500)
+        : (Number.isFinite(options.botLevel) ? options.botLevel : 1),
     // 239 Qqw6dra = isBoss. Drives the "Kill the boss!" HUD text and the boss HP-bar overlay —
     // also hardcoded false before.
     239, !!options.isBoss,

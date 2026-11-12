@@ -1675,13 +1675,21 @@ let PICKUP_RADIUS = S.define({
 function _randomPickupWeapon() {
   return PICKUP_WEAPON_IDS[Math.floor(Math.random() * PICKUP_WEAPON_IDS.length)];
 }
-// Parallel to bpw.pickupPoints: { weaponTypeId, availableAtTick }. weaponTypeId is ALWAYS a real
-// nid, pre-rolled for the NEXT grant — see buildWeaponPickupBlock's header comment for why a point
-// can never go through an "no weapon at all" state on the wire. Rebuilt whenever the point count no
-// longer matches the active map (first boot, or a map switch changed the list).
+// Survival only — see SURVIVAL_TIER_WEIGHTS/SURVIVAL_TIER_GLOW_INDEX's own comment. Deathmatch
+// always gets tier 1 (glow index 0, the plain white default), matching current/original behavior
+// exactly — this function is a no-op outside survival.
+function _rollPickupTier() {
+  return GAME_MODE === "survival" ? pickWeightedTier() : 1;
+}
+// Parallel to bpw.pickupPoints: { weaponTypeId, tier, availableAtTick }. weaponTypeId is ALWAYS a
+// real nid, pre-rolled for the NEXT grant — see buildWeaponPickupBlock's header comment for why a
+// point can never go through an "no weapon at all" state on the wire. Rebuilt whenever the point
+// count no longer matches the active map (first boot, or a map switch changed the list).
 let _pickupState = [];
 function _resetPickupState() {
-  _pickupState = (bpw.pickupPoints || []).map(() => ({ weaponTypeId: _randomPickupWeapon(), availableAtTick: 0 }));
+  _pickupState = (bpw.pickupPoints || []).map(() => ({
+    weaponTypeId: _randomPickupWeapon(), tier: _rollPickupTier(), availableAtTick: 0,
+  }));
 }
 
 // Detect weaponList removals and age the weapon-slot re-announce window (opcode 135's delete,
@@ -1864,6 +1872,7 @@ function processWeaponPickups(sessions, tick) {
       if (dist > PICKUP_RADIUS) continue;
       _grantPickupWeapon(p, st.weaponTypeId, !!s.isBot);
       st.weaponTypeId = _randomPickupWeapon();   // pre-roll the NEXT weapon this point will offer
+      st.tier = _rollPickupTier();               // and its glow tier — see buildWeaponPickupBlock
       st.availableAtTick = tick + PICKUP_RESPAWN_TICKS;
       break;   // point is now empty; no one else can take it this tick
     }
@@ -1914,10 +1923,12 @@ function buildWeaponPickupBlock() {
     // `undefined`, and the renderer's lookup (`i[o.Qwhlcdr]`) then falls through to its own default
     // fallback style, which has opacity 0 — the sprite is still created and added to the scene, just
     // fully transparent, which is exactly "spawns with no glow at all". Index 0 is that same
-    // palette's OTHER 'default'-labelled entry, at the renderer's normal 0.7 opacity — visible,
-    // without claiming a specific weapon rarity we have no source data for (the weapon catalogue
-    // carries no rarity field at all).
-    block.push(278, i, 270, i, 271, st.weaponTypeId, 273, hidden ? PICKUP_HIDE_SENTINEL : 0, 274, 0, 275, null);
+    // palette's OTHER 'default'-labelled entry, at the renderer's normal 0.7 opacity — the plain
+    // white glow deathmatch always gets (tier 1, no source data ever varies this outside
+    // survival). In survival, st.tier (rolled when the point last respawned — see
+    // SURVIVAL_TIER_GLOW_INDEX) picks a real color: white/blue/purple/gold for tier 1-4.
+    const glowIndex = SURVIVAL_TIER_GLOW_INDEX[(st.tier || 1) - 1] ?? 0;
+    block.push(278, i, 270, i, 271, st.weaponTypeId, 273, hidden ? PICKUP_HIDE_SENTINEL : 0, 274, glowIndex, 275, null);
   }
   return block;
 }
@@ -3156,6 +3167,11 @@ function simulateGrenades(dt, sessions) {
   // sim AND the firing path (shooting a mine, fireHitscan runs earlier in the tick) and is cleared
   // once, after the broadcast (next to _pendingBullets). Resetting here would drop firing-time removals.
   for (const [key, g] of activeEntities) {
+    // Survival health/armor kits are stationary pickups, not grenades — none of this function's
+    // fuse/physics/explosion machinery applies to them (worse: stepEntity would force a
+    // non-finite fuse to 1 and then decrement it to 0 almost immediately, deleting the item a
+    // tick after it spawned). tickSurvivalItems owns their entire lifecycle instead.
+    if (g.isSurvivalItem) continue;
     // ── Per-entity isolation ────────────────────────────────────────────────────────────────────
     // This loop used to be bare. A throw from any one entity's trigger logic (a proximity scan, an
     // explosion, a raycast against geometry) escaped the whole function, which is called straight
@@ -5612,14 +5628,93 @@ function processDeathRespawn(sessions) {
     }
     if (p.deathStateTimer <= 0) continue;
     p.deathStateTimer += 1;
-    if (p.deathStateTimer > RESPAWN_TICKS) {
-      // Survival: a real player who dies is OUT for the rest of the round — no respawn. Bots
-      // (including the boss) keep respawning normally either way, same as deathmatch — the wave
-      // scheduler's own target count backfills any that just don't come back for other reasons.
-      if (GAME_MODE === "survival" && !s.isBot) s.survivalOut = true;
-      else respawnPlayerNow(p);
+    if (GAME_MODE === "survival" && !s.isBot) {
+      // A real player who dies is DOWNED, not instantly out — see tickSurvivalRevives, which
+      // runs right after this phase and can clear deathStateTimer back to 0 if a teammate
+      // finishes reviving them before the bleed-out window below elapses. Bots (including the
+      // boss) keep respawning normally either way, same as deathmatch.
+      if (p.deathStateTimer > SURVIVAL_BLEEDOUT_TICKS) s.survivalOut = true;
+    } else if (p.deathStateTimer > RESPAWN_TICKS) {
+      respawnPlayerNow(p);
     }
   }
+}
+
+// Survival's revive mechanic. Confirmed from the real client bundle (the code it runs to PREDICT
+// its own revive progress locally, since the #resurrect_div progress bar has to animate smoothly
+// between server updates): a reviver holds position near a downed teammate; once
+// reviveHoldTicks >= resurrectionTime, the target comes back and the reviver gets a small health
+// reward. Simplified in one place from the confirmed mechanic — see SURVIVAL_RESURRECTION_TICKS'
+// own comment on why this is proximity-only rather than gated on a held interact key.
+function tickSurvivalRevives(sessions) {
+  const survival = GAME_MODE === "survival";
+  for (const s of sessions.values()) {
+    if (!s || !s.accepted || s.isBot) continue;
+    const p = s.playerState;
+    if (!p) continue;
+    if (!survival) {
+      // Keep the wire fields clean outside survival so a mode switch mid-session never leaves a
+      // stale revive-in-progress bar showing in deathmatch.
+      if (p.reviveTargetId !== -1) p.reviveTargetId = -1;
+      if (p.reviveHoldTicks !== 0) p.reviveHoldTicks = 0;
+      continue;
+    }
+    // Only an ALIVE real player can revive someone — a downed player obviously cannot, and a
+    // player already finalized out for the round has nothing left to do either.
+    if (p.deathStateTimer > 0 || p.healthPoints <= 0 || s.survivalOut) {
+      p.reviveTargetId = -1; p.reviveHoldTicks = 0;
+      continue;
+    }
+
+    // Does the CURRENT target (if any) still qualify? A target stops qualifying the instant they
+    // move out of range, get revived by someone else, or get finalized out — any of those resets
+    // progress rather than silently keeping a stale hold count going.
+    let target = null;
+    if (p.reviveTargetId !== -1) {
+      const cur = sessions.get(p.reviveTargetId);
+      if (cur && cur.accepted && !cur.isBot && !cur.survivalOut && cur.playerState
+          && cur.playerState.deathStateTimer > 0
+          && _distance(p.position, cur.playerState.position) <= SURVIVAL_REVIVE_RANGE) {
+        target = cur;
+      }
+    }
+    if (!target) {
+      // Look for a NEW eligible target — nearest downed, not-yet-out real player in range.
+      let best = null, bestDist = Infinity;
+      for (const other of sessions.values()) {
+        if (!other || other === s || other.isBot || !other.accepted || other.survivalOut) continue;
+        const op = other.playerState;
+        if (!op || op.deathStateTimer <= 0) continue;
+        const d = _distance(p.position, op.position);
+        if (d <= SURVIVAL_REVIVE_RANGE && d < bestDist) { best = other; bestDist = d; }
+      }
+      if (best) { target = best; p.reviveTargetId = best.playerId; p.reviveHoldTicks = 0; }
+    }
+
+    if (!target) {
+      p.reviveTargetId = -1; p.reviveHoldTicks = 0;
+      continue;
+    }
+
+    p.reviveHoldTicks += 1;
+    if (p.reviveHoldTicks < SURVIVAL_RESURRECTION_TICKS) continue;
+
+    // Revive complete.
+    const tp = target.playerState;
+    if (tp && tp.deathStateTimer > 0 && !target.survivalOut) {
+      tp.deathStateTimer = 0;
+      tp.healthPoints = SURVIVAL_REVIVE_HEAL;
+      tp.armorPoints = 0;
+      console.log(`[evio-local] survival: ${s.displayName} revived ${target.displayName}`);
+    }
+    p.healthPoints = Math.min(1, p.healthPoints + SURVIVAL_REVIVER_HEAL_REWARD);
+    p.reviveTargetId = -1;
+    p.reviveHoldTicks = 0;
+  }
+}
+function _distance(a, b) {
+  if (!a || !b) return Infinity;
+  return Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z);
 }
 
 // The respawn EFFECT — full HP, a spawn point, a full magazine, the primary in hand, cleared physics
@@ -5744,6 +5839,10 @@ function createPlayerSimState(spawn = {}, sessionId = null) {
     healthPoints: 1,        // full = 1.0; damage reduces it; <=0 → death
     armorPoints: 0,         // absorbs damage before health
     deathStateTimer: 0,     // 0 = alive; >0 counts up while dead until respawn
+    // Survival revive (opcodes 200/201, Qqrmhn0/Q4vkuy3). -1 = not currently reviving anyone.
+    // See tickSurvivalRevives — meaningless/always -1,0 outside survival.
+    reviveTargetId: -1,
+    reviveHoldTicks: 0,
     fireCooldown: 0,        // ticks until the weapon can fire again
     spawnSeed: 0,           // which spawn point this player last used (cycles on respawn)
     position: {
@@ -7590,6 +7689,11 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       // - 0.01*Qwv47ix, 0)^2. Server-authoritative (the client's own flash detection never
       // runs for our colliderless server-spawned grenade).
       198, Math.max(0, Number.isFinite(playerState.energyCharge) ? playerState.energyCharge : 0),
+      // 200 Qqrmhn0 (who this player is reviving, -1 = nobody) / 201 Q4vkuy3 (ticks held reviving
+      // them) — survival's revive mechanic. See tickSurvivalRevives. Harmless outside survival:
+      // always -1/0 there, so the client's revive-progress UI never has anything to show.
+      200, Number.isFinite(playerState.reviveTargetId) ? playerState.reviveTargetId : -1,
+      201, Number.isFinite(playerState.reviveHoldTicks) ? playerState.reviveHoldTicks : 0,
       // 207 isThirdPerson: kept FALSE. (isThirdPerson would push a DEAD player into the spectator branch
       // (:53201) instead of the alive=4 killcam else-branch, and is meant for a manual 3rd-person toggle.)
       207, false,
@@ -7793,6 +7897,11 @@ function buildTickBody(playerId, tick, playerState = createPlayerSimState(), pee
   // client-side — see match.roundStartTick's own comment. Sent every tick (not bootstrap-only)
   // so it's never stale even if a client missed the bootstrap packet somehow.
   body.push(298, match.roundStartTick);
+  // 306 Qvio95c — the active special wave's name, or null when none. The client turns this
+  // straight into the "Special wave spawning: X" chat line and the #special_wave_info text on
+  // its own — see tickSurvivalWaves/SPECIAL_WAVE_TYPES. 306 > 298 so it rides here too.
+  body.push(306, GAME_MODE === "survival" && survivalState.activeSpecialWave
+    ? survivalState.activeSpecialWave.name : null);
   // 308 Qi3xpyi — per-teleporter last-used tick, driving the client's portal burst effect. It
   // decodes AFTER the 244 player loop (bundle :66224 vs :65808), so unlike the rest of the world
   // state it cannot ride in the header: the client's single ascending scan would stall on it and
@@ -7841,6 +7950,9 @@ function buildPeerBootstrapDelta(peer) {
     // peer-introduction builder, not duplicated per call site.
     isBot: !!peer.isBot,
     isBoss: !!peer.isBoss,
+    // 238 — see state_builder.js's own comment on the dual bot-level/boss-reward meaning.
+    botLevel: peer.botLevel,
+    bossReward: SURVIVAL_BOSS_REWARD,
     // Opcode 235 = clan insignia image. This was MISSING, which is why a player saw their OWN clan
     // logo but never a peer's: the avatar is a PROP (the ~3 roster covers every session) whereas
     // the clan image is a per-ENTITY opcode, and it was only ever filled in for the local player's
@@ -8951,6 +9063,208 @@ let SURVIVAL_BOSS_DAMAGE_RESIST = S.define({
       + "is tankier by taking less damage per hit instead, which keeps its health bar meaningful.",
 }, (v) => { SURVIVAL_BOSS_DAMAGE_RESIST = v; });
 
+let SURVIVAL_BOSS_REWARD = S.define({
+  key: "survivalBossReward", env: "EVIO_SURVIVAL_BOSS_REWARD", type: "int", def: 500, min: 0, max: 100000,
+  category: "Survival", label: "Boss kill reward (display only)",
+  desc: "The number shown in \"{boss} spawned with {N}e reward\" (opcode 238, overloaded with the "
+      + "normal bot-level badge — see state_builder.js). Cosmetic only — this project has no "
+      + "currency/wallet system of its own, so nothing is actually granted; it's purely the "
+      + "chat-announcement number the real client expects to see.",
+}, (v) => { SURVIVAL_BOSS_REWARD = v; });
+
+// ── Survival revive ──────────────────────────────────────────────────────────────────────────
+// Confirmed from the real client bundle: a downed (health<=0) teammate isn't instantly and
+// permanently out — anyone else nearby can revive them within a window. Opcodes 200 (Qqrmhn0,
+// who's being revived) / 201 (Q4vkuy3, ticks held) stream the in-progress state so the client's
+// own #resurrect_div progress bar (already present in the HTML, never populated before this)
+// renders correctly. Simplified from the real mechanic in one way: official requires holding an
+// interact key; this is proximity-only (just stand near them) — no interact-key opcode has been
+// identified in this project yet, and proximity-only is a reasonable, honest stand-in rather than
+// blocking the whole mechanic on finding one.
+let SURVIVAL_RESURRECTION_TICKS = S.define({
+  key: "survivalResurrectionTicks", env: "EVIO_SURVIVAL_RESURRECTION_TICKS", type: "int", def: 200, min: 20, max: 2000,
+  category: "Survival", label: "Revive duration (ticks)",
+  desc: "How long a nearby teammate must stay in range to complete a revive. 200 = 10s at 20Hz, "
+      + "matching official survival's own resurrectionTime constant.",
+}, (v) => { SURVIVAL_RESURRECTION_TICKS = v; });
+
+let SURVIVAL_REVIVE_RANGE = S.define({
+  key: "survivalReviveRange", env: "EVIO_SURVIVAL_REVIVE_RANGE", type: "number", def: 5, min: 1, max: 20, step: 0.5,
+  category: "Survival", label: "Revive range (u)",
+  desc: "Max distance to a downed teammate that still counts as reviving them. 5 matches "
+      + "official survival's own Qd9jbxq constant.",
+}, (v) => { SURVIVAL_REVIVE_RANGE = v; });
+
+let SURVIVAL_BLEEDOUT_TICKS = S.define({
+  key: "survivalBleedoutTicks", env: "EVIO_SURVIVAL_BLEEDOUT_TICKS", type: "int", def: 400, min: 20, max: 6000,
+  category: "Survival", label: "Bleed-out window (ticks)",
+  desc: "How long a downed player can still be revived before they're finalized as OUT for the "
+      + "round (no official source confirms this exact number — picked to give teammates a "
+      + "real chance without letting one down player stall the round forever). 400 = 20s at 20Hz.",
+}, (v) => { SURVIVAL_BLEEDOUT_TICKS = v; });
+
+let SURVIVAL_REVIVE_HEAL = S.define({
+  key: "survivalReviveHeal", env: "EVIO_SURVIVAL_REVIVE_HEAL", type: "number", def: 0.5, min: 0.05, max: 1, step: 0.05,
+  category: "Survival", label: "Health on revival",
+  desc: "Fraction of max health a revived player comes back with (the real client's own revive "
+      + "code only shows the REVIVER's own +25% reward explicitly — the revived player's own "
+      + "restored health isn't visible in client-predicted code, so this is our own choice).",
+}, (v) => { SURVIVAL_REVIVE_HEAL = v; });
+
+let SURVIVAL_REVIVER_HEAL_REWARD = S.define({
+  key: "survivalReviverHealReward", env: "EVIO_SURVIVAL_REVIVER_HEAL_REWARD", type: "number", def: 0.25, min: 0, max: 1, step: 0.05,
+  category: "Survival", label: "Reviver's own health reward",
+  desc: "Fraction of health the REVIVER gains on completing a revive — confirmed directly from "
+      + "the real client bundle (r.Qq7zdfv=Math.min(r.Qq7zdfv+.25,1)).",
+}, (v) => { SURVIVAL_REVIVER_HEAL_REWARD = v; });
+
+// ── Survival special waves ───────────────────────────────────────────────────────────────────
+// Confirmed from the real client bundle's own survival config (Qlnsga8): four named special
+// waves, each force-equipping a weapon on BOTS ONLY (never real players — confirmed live; the
+// client has no consuming code for this at all, meaning it's a pure server-side decision the
+// client just sees as "this bot happens to be holding a rocket launcher now", same as any other
+// weapon change) for the duration of that wave. Announced via opcode 306 (Qvio95c), which the
+// client turns into the "Special wave spawning: X" chat line and the #special_wave_info text
+// entirely on its own — we only have to send the name.
+const SPECIAL_WAVE_TYPES = [
+  { name: "Rocket Wave", weight: 1, minWave: 5, weaponId: 8 },     // Rocket Launcher
+  { name: "Grenade Wave", weight: 1, minWave: 5, weaponId: 283 },  // Grenade Launcher
+  { name: "Teleporters", weight: 3, minWave: 5, weaponId: null },  // no forced weapon — environmental
+  { name: "Smoke Wave", weight: 1, minWave: 5, weaponId: null },   // no forced weapon — environmental
+];
+
+let SURVIVAL_SPECIAL_WAVE_CHANCE = S.define({
+  key: "survivalSpecialWaveChance", env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE", type: "number", def: 0.3, min: 0, max: 1, step: 0.05,
+  category: "Survival", label: "Special wave chance (per eligible wave)",
+  desc: "Odds a NEW wave (past minWave=5) rolls as a special wave instead of a normal one. The "
+      + "real client's own exact trigger cadence couldn't be confirmed from bundle analysis — "
+      + "this is our own reasonable choice, not a reverse-engineered constant.",
+}, (v) => { SURVIVAL_SPECIAL_WAVE_CHANCE = v; });
+
+function pickSpecialWaveType() {
+  const total = SPECIAL_WAVE_TYPES.reduce((sum, w) => sum + w.weight, 0);
+  let roll = Math.random() * total;
+  for (const w of SPECIAL_WAVE_TYPES) {
+    if (roll < w.weight) return w;
+    roll -= w.weight;
+  }
+  return SPECIAL_WAVE_TYPES[0];
+}
+
+// ── Survival weapon-pickup tiers ─────────────────────────────────────────────────────────────
+// Confirmed from the real client bundle: the pickup glow sprite (opcode 274/Qwhlcdr) indexes a
+// hardcoded 7-entry client-side palette — white(x2)/blue/purple/gold/magenta("Epic")/orange
+// ("Legendary"). Deathmatch always sends 274=0 (the plain white default, confirmed in our own
+// buildWeaponPickupBlock). Survival's own wpnTier1-4SpawnWeight constants (1/.7/.4/.2) pick a
+// loot tier per pickup; mapped here to the first four non-duplicate palette entries. (We could
+// not find ANY runtime consumer of maxWeaponTier/wpnTierNSpawnWeight in the client — the tier
+// system is entirely server-side, so which tier maps to which actual WEAPON is our own design
+// choice, not reverse-engineered: tier only changes the glow color here, not which weapon spawns.)
+const SURVIVAL_TIER_WEIGHTS = [1, 0.7, 0.4, 0.2];          // tier 1..4, relative weight
+const SURVIVAL_TIER_GLOW_INDEX = [0, 2, 3, 4];             // tier 1..4 -> opcode 274 palette index
+
+function pickWeightedTier() {
+  const total = SURVIVAL_TIER_WEIGHTS.reduce((a, b) => a + b, 0);
+  let roll = Math.random() * total;
+  for (let i = 0; i < SURVIVAL_TIER_WEIGHTS.length; i++) {
+    if (roll < SURVIVAL_TIER_WEIGHTS[i]) return i + 1;
+    roll -= SURVIVAL_TIER_WEIGHTS[i];
+  }
+  return 1;
+}
+
+// ── Survival health/armor item pickups ──────────────────────────────────────────────────────
+// Confirmed from the real client bundle: a "Health Kit" (+50% health) and "Armor" (+25% armor)
+// exist in the client's own active-items catalogue (Gh.Qcvnlvz — physics_extracted.js stubs
+// this as an unported Proxy, see its own comment), alongside their 3D models
+// (HealthBoost.evobj/ArmorBoost.evobj, which this project already has on disk). What's genuinely
+// UNCERTAIN here, flagged rather than silently assumed: we could not confirm from static bundle
+// analysis which wire mechanism actually spawns a world-lying item kit (unlike grenades, where
+// the "worldState.activeEntities" opcode 268 path is fully traced and verified). This reuses that
+// SAME activeEntities stream, with weaponTypeId values (9001/9002) chosen specifically OUTSIDE
+// the real grenade-type range to avoid colliding with one — if the client's generic entity
+// renderer resolves an unrecognized type id to nothing, the pickup EFFECT below still works
+// correctly end to end, it would just be invisible until verified live and corrected.
+const SURVIVAL_ITEM_TYPE = { HEALTH: 9001, ARMOR: 9002 };
+
+let SURVIVAL_ITEM_SPAWN_TICKS = S.define({
+  key: "survivalItemSpawnTicks", env: "EVIO_SURVIVAL_ITEM_SPAWN_TICKS", type: "int", def: 300, min: 20, max: 6000,
+  category: "Survival", label: "Item spawn interval (ticks)",
+  desc: "How often a new health/armor kit appears (while under the max below). 300 = 15s at 20Hz.",
+}, (v) => { SURVIVAL_ITEM_SPAWN_TICKS = v; });
+
+let SURVIVAL_MAX_ITEMS = S.define({
+  key: "survivalMaxItems", env: "EVIO_SURVIVAL_MAX_ITEMS", type: "int", def: 3, min: 0, max: 20,
+  category: "Survival", label: "Max items on the ground at once",
+}, (v) => { SURVIVAL_MAX_ITEMS = v; });
+
+let SURVIVAL_HEALTH_KIT_HEAL = S.define({
+  key: "survivalHealthKitHeal", env: "EVIO_SURVIVAL_HEALTH_KIT_HEAL", type: "number", def: 0.5, min: 0.05, max: 1, step: 0.05,
+  category: "Survival", label: "Health Kit heal amount",
+  desc: "Confirmed from the real client's own item catalogue (Health Kit: .5 = 50%).",
+}, (v) => { SURVIVAL_HEALTH_KIT_HEAL = v; });
+
+let SURVIVAL_ARMOR_KIT_AMOUNT = S.define({
+  key: "survivalArmorKitAmount", env: "EVIO_SURVIVAL_ARMOR_KIT_AMOUNT", type: "number", def: 0.25, min: 0.05, max: 1, step: 0.05,
+  category: "Survival", label: "Armor Kit amount",
+  desc: "Confirmed from the real client's own item catalogue (Armor: .25 = 25%).",
+}, (v) => { SURVIVAL_ARMOR_KIT_AMOUNT = v; });
+
+let _survivalLastItemSpawnTick = 0;
+
+function spawnSurvivalItem() {
+  const pts = bpw.pickupPoints || [];
+  if (!pts.length) return;
+  const pt = pts[Math.floor(Math.random() * pts.length)];
+  const isHealth = Math.random() < 0.5;
+  const key = ++_entityCounter;
+  activeEntities.set(key, {
+    sessionId: key,
+    ownerSid: null,
+    pos: { x: pt.x, y: pt.y, z: pt.z },
+    vel: { x: 0, y: 0, z: 0 },      // stationary — not thrown, just sitting on the ground
+    type: isHealth ? SURVIVAL_ITEM_TYPE.HEALTH : SURVIVAL_ITEM_TYPE.ARMOR,
+    numberProp: 0,
+    spawnTick: 0,
+    _bornTick: _live.globalTick || 0,
+    fuse: Infinity,                 // never auto-expires — only removed by pickup or round reset
+    isStuck: 0,
+    qt6bqft: null,                  // must be explicit — see buildActiveEntityBlock's own comment
+    isSurvivalItem: true,           // marks this for tickSurvivalItems' own proximity sweep
+  });
+}
+
+// Periodic spawn + proximity pickup for health/armor kits. A no-op outside survival, same
+// pattern as every other survival-only tick function.
+function tickSurvivalItems(sessions) {
+  if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
+  const tick = _live.globalTick || 0;
+  let liveItemCount = 0;
+  for (const g of activeEntities.values()) if (g.isSurvivalItem) liveItemCount++;
+  if (tick - _survivalLastItemSpawnTick >= SURVIVAL_ITEM_SPAWN_TICKS && liveItemCount < SURVIVAL_MAX_ITEMS) {
+    _survivalLastItemSpawnTick = tick;
+    spawnSurvivalItem();
+  }
+
+  for (const [key, g] of activeEntities) {
+    if (!g.isSurvivalItem) continue;
+    for (const s of sessions.values()) {
+      if (!s || !s.accepted) continue;
+      const p = s.playerState;
+      if (!p || !p.position || p._holdForPlay || p.deathStateTimer > 0 || p.healthPoints <= 0) continue;
+      if (_distance(p.position, g.pos) > PICKUP_RADIUS) continue;
+      if (g.type === SURVIVAL_ITEM_TYPE.HEALTH) {
+        p.healthPoints = Math.min(1, p.healthPoints + SURVIVAL_HEALTH_KIT_HEAL);
+      } else {
+        p.armorPoints = Math.min(1, p.armorPoints + SURVIVAL_ARMOR_KIT_AMOUNT);
+      }
+      activeEntities.delete(key);
+      removedEntityKeys.push(key);
+      break;   // this item is gone; no one else can take it
+    }
+  }
+}
+
 // Ephemeral — not persisted, reset every round (startNewRound) and on mode switch. Deliberately
 // NOT driven through S.set()/botCount: that setting is explicitly the DEATHMATCH bot-count dial,
 // and routing wave escalation through it would (a) persist whatever the last wave reached as the
@@ -8961,10 +9275,25 @@ let SURVIVAL_BOSS_DAMAGE_RESIST = S.define({
 // No waveStartTick of its own — match.roundStartTick (opcode 298) IS that anchor, the same one
 // the client's own wave-number formula uses, so our escalation and the client's independently-
 // computed HUD text can never drift apart.
-let survivalState = { currentWave: -1, bossPlayerId: null };
+let survivalState = { currentWave: -1, bossPlayerId: null, activeSpecialWave: null };
 
 function resetSurvivalState() {
-  survivalState = { currentWave: -1, bossPlayerId: null };
+  survivalState = { currentWave: -1, bossPlayerId: null, activeSpecialWave: null };
+}
+
+// Forces a bot onto the given weapon — same shape as spawnBot's own weapon-equip block, just
+// applied to an already-live bot instead of at creation time. Used for special-wave forced
+// loadouts (and to revert them once that wave ends).
+function _forceSurvivalBotWeapon(bot, weaponId) {
+  const p = bot.playerState;
+  if (!p || p.equippedWeaponId === weaponId) return;
+  p.equippedWeaponId = weaponId;
+  p.backupWeaponId = -1;
+  p.weaponList = weaponId === SWORD_WEAPON_ID ? [SWORD_WEAPON_ID] : [weaponId, SWORD_WEAPON_ID];
+  p._ammoGunId = weaponId;
+  p.gunAmmo = weaponClip(weaponId, p);
+  p.reloadTicks = 0;
+  bot.weaponId = weaponId;
 }
 
 // Official survival's own wave-number formula (confirmed from the real client bundle, Qmpb4uv):
@@ -9011,6 +9340,19 @@ function tickSurvivalWaves(sessions) {
   // deathmatch pool — a wave escalating is supposed to make EVERY bot in it sharper, not just the
   // newly-spawned ones.
   for (const b of survivalBots()) b.botLevel = targetLevel;
+
+  // Special waves — rolled once per wave (minWave=5), bot-only forced loadout for the duration.
+  // Re-applied to every survival bot (new AND existing) on every wave boundary, whether this
+  // wave rolled a special type or not — that one assignment naturally both applies a forced
+  // weapon when one starts and reverts everyone to the default weapon when it ends, with no
+  // separate "end of special wave" bookkeeping needed.
+  survivalState.activeSpecialWave = (wave >= 1 && Math.random() < SURVIVAL_SPECIAL_WAVE_CHANCE)
+    ? pickSpecialWaveType() : null;
+  const forcedWeaponId = (survivalState.activeSpecialWave && survivalState.activeSpecialWave.weaponId) || 4;
+  for (const b of survivalBots()) _forceSurvivalBotWeapon(b, forcedWeaponId);
+  if (survivalState.activeSpecialWave) {
+    console.log(`[evio-local] survival: wave ${wave} special wave — ${survivalState.activeSpecialWave.name}`);
+  }
 
   if (wave >= 1 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
     const bossAlive = survivalState.bossPlayerId && sessions.get(survivalState.bossPlayerId);
@@ -9725,6 +10067,9 @@ function startServer() {
       for (const s of sessions.values()) if (s.accepted && s.playerState) tickHealthRegen(s.playerState);
     });
     _phase("deathRespawn", () => processDeathRespawn(sessions));
+    // Survival's revive mechanic — BEFORE tickMatch so a revive completing this exact tick
+    // clears its target's survivalOut-eligibility before the round-wipe check reads it.
+    _phase("survivalRevives", () => tickSurvivalRevives(sessions));
     // Advance the round clock AFTER deaths/respawns so a kill in the final tick still scores,
     // and BEFORE the tick bodies are built so opcode 7/280 carry this tick's value.
     _phase("match", () => tickMatch(sessions));
@@ -9732,6 +10077,7 @@ function startServer() {
     // own first line). After tickMatch so a wipe this exact tick already flipped match.gameMode
     // to the round-over phase, which this function's own guard then correctly skips.
     _phase("survivalWaves", () => tickSurvivalWaves(sessions));
+    _phase("survivalItems", () => tickSurvivalItems(sessions));
 
     // Advance every accepted player's PEER-broadcast position (see updateBroadcastPosition) — AFTER
     // physics/respawn/teleport for this tick (so a respawn this tick is already reflected in the
@@ -9863,6 +10209,8 @@ function startServer() {
           roundStartTick: match.roundStartTick,
           isBot: !!s.isBot,
           isBoss: !!s.isBoss,
+          botLevel: s.botLevel,
+          bossReward: SURVIVAL_BOSS_REWARD,
           officialBootstrapFields: OFFICIAL_BOOTSTRAP_FIELDS,
           customMap: true,
           matchTimer: match.timer,
@@ -11602,6 +11950,12 @@ const serverExports = {
   // the object directly, because resetSurvivalState REPLACES survivalState wholesale (same
   // reasoning as getSessions()/getParityRings() above for other reassignable module state).
   tickSurvivalWaves,
+  tickSurvivalRevives,
+  tickSurvivalItems,
+  spawnSurvivalItem,
+  pickWeightedTier,
+  SURVIVAL_TIER_GLOW_INDEX,
+  SPECIAL_WAVE_TYPES,
   getSurvivalState: () => survivalState,
   handleClientSignal,
   creditKill,
