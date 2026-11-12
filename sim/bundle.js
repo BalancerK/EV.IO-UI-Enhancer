@@ -24130,6 +24130,7 @@ var EvioSim = (() => {
       if (!releasedSet.has(Number(action))) continue;
       if (playerState._grenadeThrowCd > 0) continue;
       const sid = GRENADE_ACTIONS[action];
+      if (GAME_MODE === "survival" && sid === 16) continue;
       const level = arr[sid] | 0;
       if (level <= 0) continue;
       const costs = ABILITY_COST[sid] || [1];
@@ -26169,7 +26170,7 @@ var EvioSim = (() => {
     const out = [];
     for (const other of sessions.values()) {
       if (!other || !other.accepted || other.playerId === session.playerId) continue;
-      if (session.isBot && other.isBot && !BOT_FRIENDLY_FIRE) continue;
+      if (session.isBot && other.isBot && (!BOT_FRIENDLY_FIRE || GAME_MODE === "survival")) continue;
       const op2 = other.playerState;
       if (!op2 || op2._holdForPlay) continue;
       if (op2.deathStateTimer > 0 || op2.healthPoints <= 0) continue;
@@ -30323,6 +30324,12 @@ var EvioSim = (() => {
       const session = sessions.get(playerId);
       if (!session || !session.isBot) return false;
       sessions.delete(playerId);
+      for (const [key, g2] of activeEntities) {
+        if (g2.ownerSid === playerId) {
+          activeEntities.delete(key);
+          removedEntityKeys.push(key);
+        }
+      }
       for (const recipient of sessions.values()) {
         if (!recipient || !recipient.accepted) continue;
         if (!(recipient.pendingPeerRemovals instanceof Map)) recipient.pendingPeerRemovals = /* @__PURE__ */ new Map();
@@ -30850,6 +30857,12 @@ var EvioSim = (() => {
       ws2.on("close", (code, reason) => {
         clearJoinTimer();
         sessions.delete(sessionId);
+        for (const [key, g2] of activeEntities) {
+          if (g2.ownerSid === playerId) {
+            activeEntities.delete(key);
+            removedEntityKeys.push(key);
+          }
+        }
         for (const other of sessions.values()) {
           if (!other || other.playerId === playerId || !other.accepted) continue;
           if (!(other.pendingPeerRemovals instanceof Map)) other.pendingPeerRemovals = /* @__PURE__ */ new Map();
@@ -31095,6 +31108,7 @@ var EvioSim = (() => {
     // Section 4: damage grenades
     GRENADE_COMBAT,
     GRENADE_ACTIONS,
+    processGrenadeCast,
     GRENADE_TYPE,
     applyExplosionDamage,
     applyExplosionKnockback,

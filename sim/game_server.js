@@ -2512,6 +2512,11 @@ function processGrenadeCast(playerState, releasedSet) {
     if (!releasedSet.has(Number(action))) continue;
     if (playerState._grenadeThrowCd > 0) continue;   // just threw → ignore the duplicate release edge
     const sid = GRENADE_ACTIONS[action];
+    // Confirmed real: survival's own gamemode config ships disableImpulse:true. sid 16 is
+    // Impulse (GRENADE_TYPE[16]=355) — skip it entirely here, upstream of charge/cooldown
+    // consumption, so it's a true no-op for every caster (real player AND bot tactic alike,
+    // since both funnel through this same dispatch).
+    if (GAME_MODE === "survival" && sid === 16) continue;
     const level = arr[sid] | 0;
     if (level <= 0) continue;                 // ability not allocated → Q94ze8t would return false
     const costs = ABILITY_COST[sid] || [1];
@@ -5014,7 +5019,10 @@ function _visibleEnemies(session, sessions, maxDist, globalTick) {
     // another bot as its target still walks up and swings/shoots at something it can never hurt —
     // which reads as broken, not "friendly". So when it's off, bots don't even TARGET each other:
     // both sides of the pair have to be bots (a real player is never filtered either direction).
-    if (session.isBot && other.isBot && !BOT_FRIENDLY_FIRE) continue;
+    // Survival's own bot-vs-bot block in applyDamage is UNCONDITIONAL (not governed by
+    // botFriendlyFire — the whole horde is always one side there), so the targeting filter has
+    // to be unconditional too, or bots walk up and swing at allies they can never actually hurt.
+    if (session.isBot && other.isBot && (!BOT_FRIENDLY_FIRE || GAME_MODE === "survival")) continue;
     const op = other.playerState;
     if (!op || op._holdForPlay) continue;
     if (op.deathStateTimer > 0 || op.healthPoints <= 0) continue;
@@ -10948,6 +10956,14 @@ function startServer() {
     const session = sessions.get(playerId);
     if (!session || !session.isBot) return false;
     sessions.delete(playerId);
+    // Any grenade/projectile this bot owns (thrown ability grenade, or a fired Rocket/Grenade
+    // Launcher shell from a survival special wave) must not outlive it — a still-flying entity
+    // with a now-dangling ownerSid is exactly the shape of reference the client's own sound/
+    // effect tracking has repeatedly crashed on resolving (several independent, unguarded
+    // Qa7phk3[ownerSid] lookups — see SURVIVAL_BOT_REMOVAL_GRACE_TICKS' own comment).
+    for (const [key, g] of activeEntities) {
+      if (g.ownerSid === playerId) { activeEntities.delete(key); removedEntityKeys.push(key); }
+    }
     // Same departure bookkeeping a disconnecting real player gets, so peers see them vanish
     // (244,-1,id markers) instead of freezing forever on their last known position.
     for (const recipient of sessions.values()) {
@@ -11671,6 +11687,12 @@ function startServer() {
     ws.on("close", (code, reason) => {
       clearJoinTimer();
       sessions.delete(sessionId);
+      // Same reasoning as removeBot's own cleanup: a grenade/projectile this player owns must
+      // not outlive them — a dangling ownerSid is the exact shape of reference the client's own
+      // sound/effect tracking has repeatedly crashed on resolving.
+      for (const [key, g] of activeEntities) {
+        if (g.ownerSid === playerId) { activeEntities.delete(key); removedEntityKeys.push(key); }
+      }
       // Tell every remaining client to delete this departed player: queue a
       // `244, -1, <playerId>` removal marker (resent a few ticks for reliability).
       // Without this the client keeps the stale peer model + scoreboard entry.
@@ -12023,6 +12045,7 @@ const serverExports = {
   // Section 4: damage grenades
   GRENADE_COMBAT,
   GRENADE_ACTIONS,
+  processGrenadeCast,
   GRENADE_TYPE,
   applyExplosionDamage,
   applyExplosionKnockback,
