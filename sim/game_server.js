@@ -2809,6 +2809,7 @@ function dealGrenadeHit(victim, ownerSid, damage, weaponType, srcPos, sessions) 
     // Same botFriendlyFire resolution applyHit does — see its call site for the full rationale.
     attackerIsBot: !!(ownerSession && ownerSession.isBot),
     victimIsBot: !!(victimSession && victimSession.isBot),
+    victimIsBoss: !!(victimSession && victimSession.isBoss),
   });
   if (LASTHITINFO_EVENTS) {
     victim._pendingHit = {
@@ -3968,10 +3969,19 @@ function applyDamage(victim, amount, attacker, opts) {
       && opts && opts.attackerIsBot && opts.victimIsBot) {
     return;
   }
+  // Survival is co-op, not every-player-for-themselves — real-player-vs-bot and bot-vs-bot
+  // (governed by botFriendlyFire above) are unaffected; only real-vs-real is blocked.
+  if (GAME_MODE === "survival" && attacker && attacker !== victim
+      && opts && !opts.attackerIsBot && !opts.victimIsBot) {
+    return;
+  }
   // The global damage scale, applied HERE so every damage source goes through it exactly once —
   // bullets, explosions, melee, fall damage. The client applies the same factor to its own predicted
   // health bar via Qsvkg5s.Qbb5ka8 (opcode 27), so the two agree; see the DAMAGE_SCALE note.
   let o = amount * DAMAGE_SCALE;
+  // Survival boss: tankier via damage RESISTANCE, not an inflated HP pool — see
+  // tickSurvivalWaves' own comment on why healthPoints (normalized 0..1) can't just be scaled up.
+  if (opts && opts.victimIsBoss) o *= SURVIVAL_BOSS_DAMAGE_RESIST;
   if (o > victim.armorPoints) {
     o -= victim.armorPoints; victim.armorPoints = 0;
     if (o > victim.healthPoints) o = victim.healthPoints;
@@ -4403,6 +4413,7 @@ function applyHit(shooter, sessions, hit, eye, shotSid) {
     playerCount: alive,
     attackerIsBot: !!(shooterSession && shooterSession.isBot),
     victimIsBot: !!(victimSession && victimSession.isBot),
+    victimIsBoss: !!(victimSession && victimSession.isBoss),
   });
   // Hit feedback, split into two independently-gated channels to bisect the on-hit model flicker.
   // HP/damage always applies regardless.
@@ -5601,7 +5612,13 @@ function processDeathRespawn(sessions) {
     }
     if (p.deathStateTimer <= 0) continue;
     p.deathStateTimer += 1;
-    if (p.deathStateTimer > RESPAWN_TICKS) respawnPlayerNow(p);
+    if (p.deathStateTimer > RESPAWN_TICKS) {
+      // Survival: a real player who dies is OUT for the rest of the round — no respawn. Bots
+      // (including the boss) keep respawning normally either way, same as deathmatch — the wave
+      // scheduler's own target count backfills any that just don't come back for other reasons.
+      if (GAME_MODE === "survival" && !s.isBot) s.survivalOut = true;
+      else respawnPlayerNow(p);
+    }
   }
 }
 
@@ -7811,6 +7828,7 @@ function buildPeerBootstrapDelta(peer) {
       },
     emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
     gamePhase: GAME_PHASE,
+    gameModeId: GAME_MODE,
     // Opcode 235 = clan insignia image. This was MISSING, which is why a player saw their OWN clan
     // logo but never a peer's: the avatar is a PROP (the ~3 roster covers every session) whereas
     // the clan image is a per-ENTITY opcode, and it was only ever filled in for the local player's
@@ -8423,6 +8441,14 @@ function startNewRound(sessions) {
   match.round += 1;
   resetMatchTimer();
   respawnAll(sessions);
+  // Survival: clear every session's out-state and reset the wave clock — a new round is a fresh
+  // run regardless of how the last one ended (timer or wipe). Harmless no-op in deathmatch
+  // (survivalOut is never set there, and the wave scheduler's own guard skips entirely).
+  for (const s of sessions.values()) if (s) s.survivalOut = false;
+  // _live.globalTick, not the bare `globalTick` closure variable — startNewRound is a
+  // module-level function, outside startServer's closure that owns that variable (same reason
+  // tickSurvivalWaves below reads it off _live too).
+  resetSurvivalState(_live.globalTick);
   // Nothing cleared thrown entities at a round boundary, so a mine or trip mine planted in round 1
   // was still armed and still killing people in round 2 — and after a map change it sat at
   // coordinates that no longer meant anything. A round is a fresh start for scores and positions; it
@@ -8447,6 +8473,14 @@ function tickMatch(sessions) {
   if (!ROUNDS_ENABLED) return;
   const wasPlaying = match.gameMode === 0;
   match.timer -= 1;
+  // Survival: the round ends the moment every REAL (non-bot) player is out (processDeathRespawn
+  // sets survivalOut once a dead player's respawn would otherwise have fired) — not on a fixed
+  // schedule. Forcing the timer to <=0 here, rather than duplicating the round-over
+  // announcement below, means this takes the exact same path a normal timer expiry would.
+  if (GAME_MODE === "survival" && wasPlaying) {
+    const real = [...sessions.values()].filter((s) => s && s.accepted && !s.isBot);
+    if (real.length && real.every((s) => s.survivalOut)) match.timer = Math.min(match.timer, 0);
+  }
   if (match.timer <= 0 && wasPlaying) {
     // Round over: switch to the scoreboard phase. The client hides weapons and shows
     // "Next round in X" derived from (400 + Qpm8qez) / matchDuration.
@@ -8810,6 +8844,122 @@ let SWORD_BOT_LEVEL = S.define({
   SWORD_BOT_LEVEL = v;
   if (_live.listBots) for (const b of _live.listBots()) if (b.isSwordBot) b.botLevel = v;
 });
+
+// ── Survival game mode ───────────────────────────────────────────────────────────────────────
+// Co-op PvE: real players share one lobby against waves of bots that escalate over time (bot
+// count + difficulty), with a tankier "boss" bot every few waves. A real player who dies is OUT
+// for the rest of the round (no respawn) — see processDeathRespawn's gameMode branch. The round
+// ends the moment every real player is out — see tickMatch's gameMode branch. No PvP — see
+// applyDamage's gameMode branch. Everything below is additive: when gameMode is "deathmatch"
+// (the default), none of this runs and behavior is unchanged from before this section existed.
+let GAME_MODE = S.define({
+  key: "gameMode", env: "EVIO_GAME_MODE", type: "enum", choices: ["deathmatch", "survival"], def: "deathmatch",
+  category: "Survival", label: "Game mode",
+  desc: "\"deathmatch\" (default, respawn-on-timer, PvP) or \"survival\" (co-op vs. escalating "
+      + "bot waves, no respawn, no PvP — see the other Survival settings for the wave curve). "
+      + "Switching modes mid-session takes effect on the NEXT round (startNewRound resets the "
+      + "wave clock and every player's out-state).",
+}, (v) => { GAME_MODE = v; });
+
+let SURVIVAL_WAVE_TICKS = S.define({
+  key: "survivalWaveTicks", env: "EVIO_SURVIVAL_WAVE_TICKS", type: "int", def: 600, min: 60, max: 12000,
+  category: "Survival", label: "Wave length (ticks)",
+  desc: "How long each wave lasts before the next one escalates bot count/level. 600 = 30s at 20Hz.",
+}, (v) => { SURVIVAL_WAVE_TICKS = v; });
+
+let SURVIVAL_BASE_BOT_COUNT = S.define({
+  key: "survivalBaseBotCount", env: "EVIO_SURVIVAL_BASE_BOT_COUNT", type: "int", def: 2, min: 0, max: 24,
+  category: "Survival", label: "Base bot count (wave 0)",
+}, (v) => { SURVIVAL_BASE_BOT_COUNT = v; });
+
+let SURVIVAL_BOT_COUNT_PER_WAVE = S.define({
+  key: "survivalBotCountPerWave", env: "EVIO_SURVIVAL_BOT_COUNT_PER_WAVE", type: "number", def: 0.5, min: 0, max: 10, step: 0.1,
+  category: "Survival", label: "Bot count added per wave",
+  desc: "Fractional is fine — the target count is floored, so e.g. 0.5 adds one bot every other wave.",
+}, (v) => { SURVIVAL_BOT_COUNT_PER_WAVE = v; });
+
+let SURVIVAL_MAX_BOT_COUNT = S.define({
+  key: "survivalMaxBotCount", env: "EVIO_SURVIVAL_MAX_BOT_COUNT", type: "int", def: 16, min: 1, max: 24,
+  category: "Survival", label: "Max bot count",
+  desc: "Hard cap on the escalating bot count, regardless of wave number.",
+}, (v) => { SURVIVAL_MAX_BOT_COUNT = v; });
+
+let SURVIVAL_LEVEL_UP_EVERY_N_WAVES = S.define({
+  key: "survivalLevelUpEveryNWaves", env: "EVIO_SURVIVAL_LEVEL_UP_EVERY_N_WAVES", type: "int", def: 3, min: 1, max: 100,
+  category: "Survival", label: "Bot level +1 every N waves",
+  desc: "Bot difficulty (1-10, same scale as botLevel) climbs by one every N waves, capped at 10.",
+}, (v) => { SURVIVAL_LEVEL_UP_EVERY_N_WAVES = v; });
+
+let SURVIVAL_BOSS_EVERY_N_WAVES = S.define({
+  key: "survivalBossEveryNWaves", env: "EVIO_SURVIVAL_BOSS_EVERY_N_WAVES", type: "int", def: 5, min: 1, max: 100,
+  category: "Survival", label: "Boss every N waves",
+  desc: "A single tankier bot (see survivalBossDamageResist) spawns on top of the normal wave "
+      + "bots every N waves — at most one alive at a time; the next one only spawns once this "
+      + "one is dead/gone.",
+}, (v) => { SURVIVAL_BOSS_EVERY_N_WAVES = v; });
+
+let SURVIVAL_BOSS_DAMAGE_RESIST = S.define({
+  key: "survivalBossDamageResist", env: "EVIO_SURVIVAL_BOSS_DAMAGE_RESIST", type: "number", def: 0.2, min: 0.01, max: 1, step: 0.01,
+  category: "Survival", label: "Boss damage resistance",
+  desc: "Multiplies incoming damage to a boss bot (0.2 = takes 20% damage, i.e. ~5x the effective "
+      + "HP of a normal bot). Not an inflated health pool — healthPoints is normalized 0..1 and "
+      + "every other system (health bar %, regen, armor) relies on that staying true, so the boss "
+      + "is tankier by taking less damage per hit instead, which keeps its health bar meaningful.",
+}, (v) => { SURVIVAL_BOSS_DAMAGE_RESIST = v; });
+
+// Ephemeral — not persisted, reset every round (startNewRound) and on mode switch. Deliberately
+// NOT driven through S.set()/botCount: that setting is explicitly the DEATHMATCH bot-count dial,
+// and routing wave escalation through it would (a) persist whatever the last wave reached as the
+// user's own saved botCount, surviving a later switch back to deathmatch, and (b) fight with
+// reconcileBotCount if an admin touches botCount while hosting survival. Survival keeps its own
+// bot pool instead, spawned/removed directly via the same _live.spawnBot/listBots/removeBot
+// reconcileBotCount itself uses — just filtered to bots THIS system spawned (isSurvivalBot).
+let survivalState = { waveStartTick: 0, currentWave: -1, bossPlayerId: null };
+
+function resetSurvivalState(tick) {
+  survivalState = { waveStartTick: tick, currentWave: -1, bossPlayerId: null };
+}
+
+// Called once per global tick (see runGlobalTickInner) while gameMode is "survival" and the
+// round is actually playing. Escalates the survival-only bot pool's target count/level as waves
+// advance, and spawns a boss on schedule.
+function tickSurvivalWaves(sessions) {
+  if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
+  if (!_live.spawnBot) return;
+
+  const wave = Math.floor((_live.globalTick - survivalState.waveStartTick) / SURVIVAL_WAVE_TICKS);
+  if (wave <= survivalState.currentWave) return;
+  survivalState.currentWave = wave;
+
+  const survivalBots = () => _live.listBots().filter((b) => b.isSurvivalBot && !b.isBoss);
+  const targetCount = Math.min(
+    SURVIVAL_MAX_BOT_COUNT,
+    Math.floor(SURVIVAL_BASE_BOT_COUNT + wave * SURVIVAL_BOT_COUNT_PER_WAVE),
+  );
+  const targetLevel = Math.min(10, 5 + Math.floor(wave / SURVIVAL_LEVEL_UP_EVERY_N_WAVES));
+
+  while (survivalBots().length < targetCount) {
+    _live.spawnBot({ level: targetLevel, isSurvivalBot: true });
+  }
+  const excess = survivalBots().length - targetCount;
+  if (excess > 0) {
+    for (const b of survivalBots().slice(targetCount)) _live.removeBot(b.playerId);
+  }
+  // Existing survival bots climb in difficulty too, same as botLevel's own onChange does for the
+  // deathmatch pool — a wave escalating is supposed to make EVERY bot in it sharper, not just the
+  // newly-spawned ones.
+  for (const b of survivalBots()) b.botLevel = targetLevel;
+
+  if (wave > 0 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
+    const bossAlive = survivalState.bossPlayerId && sessions.get(survivalState.bossPlayerId);
+    if (!bossAlive) {
+      const boss = _live.spawnBot({ level: 10, isSurvivalBot: true, isBoss: true, name: "BOSS" });
+      survivalState.bossPlayerId = boss.playerId;
+      console.log(`[evio-local] survival: wave ${wave} boss spawned (${boss.playerId})`);
+    }
+  }
+  console.log(`[evio-local] survival: wave ${wave} — bots=${targetCount} level=${targetLevel}`);
+}
 
 // ── Rolling metrics history (for the dashboard's graphs) ─────────────────────
 // getStatus() is an instantaneous snapshot, so the dashboard could only ever show "now" — useless
@@ -9516,6 +9666,10 @@ function startServer() {
     // Advance the round clock AFTER deaths/respawns so a kill in the final tick still scores,
     // and BEFORE the tick bodies are built so opcode 7/280 carry this tick's value.
     _phase("match", () => tickMatch(sessions));
+    // Survival's own wave/boss escalation — a no-op whenever gameMode isn't "survival" (see its
+    // own first line). After tickMatch so a wipe this exact tick already flipped match.gameMode
+    // to the round-over phase, which this function's own guard then correctly skips.
+    _phase("survivalWaves", () => tickSurvivalWaves(sessions));
 
     // Advance every accepted player's PEER-broadcast position (see updateBroadcastPosition) — AFTER
     // physics/respawn/teleport for this tick (so a respawn this tick is already reflected in the
@@ -9643,6 +9797,7 @@ function startServer() {
             },
           emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
           gamePhase: ROUNDS_ENABLED ? match.gameMode : GAME_PHASE,
+          gameModeId: GAME_MODE,
           officialBootstrapFields: OFFICIAL_BOOTSTRAP_FIELDS,
           customMap: true,
           matchTimer: match.timer,
@@ -10162,6 +10317,13 @@ function startServer() {
       // Drives which combat branch driveBotFrame uses (_swordCombatFrame vs the plant-and-shoot gun
       // branch) and which reconciler (reconcileBotCount vs reconcileSwordBotCount) owns this bot.
       isSwordBot: !!opts.swordOnly,
+      // Owned by tickSurvivalWaves' own pool, separate from the deathmatch botCount/
+      // swordBotCount pools reconcileBotCount/reconcileSwordBotCount manage — see that
+      // function's own comment for why this doesn't go through the settings layer.
+      isSurvivalBot: !!opts.isSurvivalBot,
+      // A boss takes reduced damage (survivalBossDamageResist in applyDamage) rather than an
+      // inflated HP pool — healthPoints is normalized 0..1, see tickSurvivalWaves' own comment.
+      isBoss: !!opts.isBoss,
       // 1-10, matching the official Bot Level UI.
       botLevel: Math.max(1, Math.min(10, Number.isFinite(opts.level) ? opts.level : 5)),
       sessionId, playerId, playerState,
@@ -10802,6 +10964,7 @@ function startServer() {
                 : { x: playerState.position.x, y: playerState.position.y, z: playerState.position.z, yaw: playerState.yaw },
               emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
               gamePhase: GAME_PHASE,
+              gameModeId: GAME_MODE,
               // Optional passive-official structural parity fields. Disabled by
               // default; enable with EVIO_OFFICIAL_BOOTSTRAP_FIELDS=1 for a
               // one-variable experiment.
@@ -11369,6 +11532,11 @@ const serverExports = {
   resetSessionInputStream,
   tickMatch,
   startNewRound,
+  // survival game mode — exported for test_survival_mode.js. getSurvivalState is a getter, not
+  // the object directly, because resetSurvivalState REPLACES survivalState wholesale (same
+  // reasoning as getSessions()/getParityRings() above for other reassignable module state).
+  tickSurvivalWaves,
+  getSurvivalState: () => survivalState,
   handleClientSignal,
   creditKill,
   // live loadout/cosmetics push ('#EVL#')

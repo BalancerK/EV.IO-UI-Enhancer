@@ -24338,7 +24338,8 @@ var EvioSim = (() => {
       victimUid: _uidForPlayerState(sessions, victim),
       // Same botFriendlyFire resolution applyHit does — see its call site for the full rationale.
       attackerIsBot: !!(ownerSession && ownerSession.isBot),
-      victimIsBot: !!(victimSession && victimSession.isBot)
+      victimIsBot: !!(victimSession && victimSession.isBot),
+      victimIsBoss: !!(victimSession && victimSession.isBoss)
     });
     if (LASTHITINFO_EVENTS) {
       victim._pendingHit = {
@@ -25448,7 +25449,11 @@ var EvioSim = (() => {
     if (!BOT_FRIENDLY_FIRE && attacker && attacker !== victim && opts && opts.attackerIsBot && opts.victimIsBot) {
       return;
     }
+    if (GAME_MODE === "survival" && attacker && attacker !== victim && opts && !opts.attackerIsBot && !opts.victimIsBot) {
+      return;
+    }
     let o2 = amount * DAMAGE_SCALE;
+    if (opts && opts.victimIsBoss) o2 *= SURVIVAL_BOSS_DAMAGE_RESIST;
     if (o2 > victim.armorPoints) {
       o2 -= victim.armorPoints;
       victim.armorPoints = 0;
@@ -25760,7 +25765,8 @@ var EvioSim = (() => {
       victimWasLeader: (victim.kills | 0) >= topKills && topKills > 0,
       playerCount: alive,
       attackerIsBot: !!(shooterSession && shooterSession.isBot),
-      victimIsBot: !!(victimSession && victimSession.isBot)
+      victimIsBot: !!(victimSession && victimSession.isBot),
+      victimIsBoss: !!(victimSession && victimSession.isBoss)
     });
     if (LASTHITINFO_EVENTS) {
       victim._pendingHit = {
@@ -26556,7 +26562,10 @@ var EvioSim = (() => {
       }
       if (p2.deathStateTimer <= 0) continue;
       p2.deathStateTimer += 1;
-      if (p2.deathStateTimer > RESPAWN_TICKS) respawnPlayerNow(p2);
+      if (p2.deathStateTimer > RESPAWN_TICKS) {
+        if (GAME_MODE === "survival" && !s2.isBot) s2.survivalOut = true;
+        else respawnPlayerNow(p2);
+      }
     }
   }
   function respawnPlayerNow(p2) {
@@ -27940,6 +27949,7 @@ var EvioSim = (() => {
       },
       emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
       gamePhase: GAME_PHASE,
+      gameModeId: GAME_MODE,
       // Opcode 235 = clan insignia image. This was MISSING, which is why a player saw their OWN clan
       // logo but never a peer's: the avatar is a PROP (the ~3 roster covers every session) whereas
       // the clan image is a per-ENTITY opcode, and it was only ever filled in for the local player's
@@ -28380,6 +28390,8 @@ var EvioSim = (() => {
     match.round += 1;
     resetMatchTimer();
     respawnAll(sessions);
+    for (const s2 of sessions.values()) if (s2) s2.survivalOut = false;
+    resetSurvivalState(_live.globalTick);
     clearAllEntities("round start");
     const changed = advanceMap();
     if (changed) {
@@ -28393,6 +28405,10 @@ var EvioSim = (() => {
     if (!ROUNDS_ENABLED) return;
     const wasPlaying = match.gameMode === 0;
     match.timer -= 1;
+    if (GAME_MODE === "survival" && wasPlaying) {
+      const real = [...sessions.values()].filter((s2) => s2 && s2.accepted && !s2.isBot);
+      if (real.length && real.every((s2) => s2.survivalOut)) match.timer = Math.min(match.timer, 0);
+    }
     if (match.timer <= 0 && wasPlaying) {
       match.gameMode = ROUND_END_GAMEMODE;
       const board = [...sessions.values()].filter((s2) => s2 && s2.accepted && s2.playerState).map((s2) => `${s2.displayName}=${s2.playerState.kills || 0}/${s2.playerState.deaths || 0}`).join(" ");
@@ -28685,6 +28701,144 @@ var EvioSim = (() => {
       for (const b2 of _live.listBots()) if (b2.isSwordBot) b2.botLevel = v2;
     }
   });
+  var GAME_MODE = define({
+    key: "gameMode",
+    env: "EVIO_GAME_MODE",
+    type: "enum",
+    choices: ["deathmatch", "survival"],
+    def: "deathmatch",
+    category: "Survival",
+    label: "Game mode",
+    desc: `"deathmatch" (default, respawn-on-timer, PvP) or "survival" (co-op vs. escalating bot waves, no respawn, no PvP \u2014 see the other Survival settings for the wave curve). Switching modes mid-session takes effect on the NEXT round (startNewRound resets the wave clock and every player's out-state).`
+  }, (v2) => {
+    GAME_MODE = v2;
+  });
+  var SURVIVAL_WAVE_TICKS = define({
+    key: "survivalWaveTicks",
+    env: "EVIO_SURVIVAL_WAVE_TICKS",
+    type: "int",
+    def: 600,
+    min: 60,
+    max: 12e3,
+    category: "Survival",
+    label: "Wave length (ticks)",
+    desc: "How long each wave lasts before the next one escalates bot count/level. 600 = 30s at 20Hz."
+  }, (v2) => {
+    SURVIVAL_WAVE_TICKS = v2;
+  });
+  var SURVIVAL_BASE_BOT_COUNT = define({
+    key: "survivalBaseBotCount",
+    env: "EVIO_SURVIVAL_BASE_BOT_COUNT",
+    type: "int",
+    def: 2,
+    min: 0,
+    max: 24,
+    category: "Survival",
+    label: "Base bot count (wave 0)"
+  }, (v2) => {
+    SURVIVAL_BASE_BOT_COUNT = v2;
+  });
+  var SURVIVAL_BOT_COUNT_PER_WAVE = define({
+    key: "survivalBotCountPerWave",
+    env: "EVIO_SURVIVAL_BOT_COUNT_PER_WAVE",
+    type: "number",
+    def: 0.5,
+    min: 0,
+    max: 10,
+    step: 0.1,
+    category: "Survival",
+    label: "Bot count added per wave",
+    desc: "Fractional is fine \u2014 the target count is floored, so e.g. 0.5 adds one bot every other wave."
+  }, (v2) => {
+    SURVIVAL_BOT_COUNT_PER_WAVE = v2;
+  });
+  var SURVIVAL_MAX_BOT_COUNT = define({
+    key: "survivalMaxBotCount",
+    env: "EVIO_SURVIVAL_MAX_BOT_COUNT",
+    type: "int",
+    def: 16,
+    min: 1,
+    max: 24,
+    category: "Survival",
+    label: "Max bot count",
+    desc: "Hard cap on the escalating bot count, regardless of wave number."
+  }, (v2) => {
+    SURVIVAL_MAX_BOT_COUNT = v2;
+  });
+  var SURVIVAL_LEVEL_UP_EVERY_N_WAVES = define({
+    key: "survivalLevelUpEveryNWaves",
+    env: "EVIO_SURVIVAL_LEVEL_UP_EVERY_N_WAVES",
+    type: "int",
+    def: 3,
+    min: 1,
+    max: 100,
+    category: "Survival",
+    label: "Bot level +1 every N waves",
+    desc: "Bot difficulty (1-10, same scale as botLevel) climbs by one every N waves, capped at 10."
+  }, (v2) => {
+    SURVIVAL_LEVEL_UP_EVERY_N_WAVES = v2;
+  });
+  var SURVIVAL_BOSS_EVERY_N_WAVES = define({
+    key: "survivalBossEveryNWaves",
+    env: "EVIO_SURVIVAL_BOSS_EVERY_N_WAVES",
+    type: "int",
+    def: 5,
+    min: 1,
+    max: 100,
+    category: "Survival",
+    label: "Boss every N waves",
+    desc: "A single tankier bot (see survivalBossDamageResist) spawns on top of the normal wave bots every N waves \u2014 at most one alive at a time; the next one only spawns once this one is dead/gone."
+  }, (v2) => {
+    SURVIVAL_BOSS_EVERY_N_WAVES = v2;
+  });
+  var SURVIVAL_BOSS_DAMAGE_RESIST = define({
+    key: "survivalBossDamageResist",
+    env: "EVIO_SURVIVAL_BOSS_DAMAGE_RESIST",
+    type: "number",
+    def: 0.2,
+    min: 0.01,
+    max: 1,
+    step: 0.01,
+    category: "Survival",
+    label: "Boss damage resistance",
+    desc: "Multiplies incoming damage to a boss bot (0.2 = takes 20% damage, i.e. ~5x the effective HP of a normal bot). Not an inflated health pool \u2014 healthPoints is normalized 0..1 and every other system (health bar %, regen, armor) relies on that staying true, so the boss is tankier by taking less damage per hit instead, which keeps its health bar meaningful."
+  }, (v2) => {
+    SURVIVAL_BOSS_DAMAGE_RESIST = v2;
+  });
+  var survivalState = { waveStartTick: 0, currentWave: -1, bossPlayerId: null };
+  function resetSurvivalState(tick) {
+    survivalState = { waveStartTick: tick, currentWave: -1, bossPlayerId: null };
+  }
+  function tickSurvivalWaves(sessions) {
+    if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
+    if (!_live.spawnBot) return;
+    const wave = Math.floor((_live.globalTick - survivalState.waveStartTick) / SURVIVAL_WAVE_TICKS);
+    if (wave <= survivalState.currentWave) return;
+    survivalState.currentWave = wave;
+    const survivalBots = () => _live.listBots().filter((b2) => b2.isSurvivalBot && !b2.isBoss);
+    const targetCount = Math.min(
+      SURVIVAL_MAX_BOT_COUNT,
+      Math.floor(SURVIVAL_BASE_BOT_COUNT + wave * SURVIVAL_BOT_COUNT_PER_WAVE)
+    );
+    const targetLevel = Math.min(10, 5 + Math.floor(wave / SURVIVAL_LEVEL_UP_EVERY_N_WAVES));
+    while (survivalBots().length < targetCount) {
+      _live.spawnBot({ level: targetLevel, isSurvivalBot: true });
+    }
+    const excess = survivalBots().length - targetCount;
+    if (excess > 0) {
+      for (const b2 of survivalBots().slice(targetCount)) _live.removeBot(b2.playerId);
+    }
+    for (const b2 of survivalBots()) b2.botLevel = targetLevel;
+    if (wave > 0 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
+      const bossAlive = survivalState.bossPlayerId && sessions.get(survivalState.bossPlayerId);
+      if (!bossAlive) {
+        const boss = _live.spawnBot({ level: 10, isSurvivalBot: true, isBoss: true, name: "BOSS" });
+        survivalState.bossPlayerId = boss.playerId;
+        console.log(`[evio-local] survival: wave ${wave} boss spawned (${boss.playerId})`);
+      }
+    }
+    console.log(`[evio-local] survival: wave ${wave} \u2014 bots=${targetCount} level=${targetLevel}`);
+  }
   var METRICS_HZ = 1;
   var METRICS_KEEP = 300;
   var _metrics = { hist: [], lastAt: 0, lastSim: 0, lastTick: 0 };
@@ -29223,6 +29377,7 @@ var EvioSim = (() => {
       });
       _phase("deathRespawn", () => processDeathRespawn(sessions));
       _phase("match", () => tickMatch(sessions));
+      _phase("survivalWaves", () => tickSurvivalWaves(sessions));
       _phase("peerSmoothing", () => {
         for (const s2 of sessions.values()) {
           if (!s2.accepted || !s2.playerState) continue;
@@ -29284,6 +29439,7 @@ var EvioSim = (() => {
               },
               emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
               gamePhase: ROUNDS_ENABLED ? match.gameMode : GAME_PHASE,
+              gameModeId: GAME_MODE,
               officialBootstrapFields: OFFICIAL_BOOTSTRAP_FIELDS,
               customMap: true,
               matchTimer: match.timer,
@@ -29608,6 +29764,13 @@ var EvioSim = (() => {
         // Drives which combat branch driveBotFrame uses (_swordCombatFrame vs the plant-and-shoot gun
         // branch) and which reconciler (reconcileBotCount vs reconcileSwordBotCount) owns this bot.
         isSwordBot: !!opts.swordOnly,
+        // Owned by tickSurvivalWaves' own pool, separate from the deathmatch botCount/
+        // swordBotCount pools reconcileBotCount/reconcileSwordBotCount manage — see that
+        // function's own comment for why this doesn't go through the settings layer.
+        isSurvivalBot: !!opts.isSurvivalBot,
+        // A boss takes reduced damage (survivalBossDamageResist in applyDamage) rather than an
+        // inflated HP pool — healthPoints is normalized 0..1, see tickSurvivalWaves' own comment.
+        isBoss: !!opts.isBoss,
         // 1-10, matching the official Bot Level UI.
         botLevel: Math.max(1, Math.min(10, Number.isFinite(opts.level) ? opts.level : 5)),
         sessionId,
@@ -30103,6 +30266,7 @@ var EvioSim = (() => {
                 spawn: playerState && playerState._holdForPlay ? { x: 0, y: 0, z: 0, yaw: 0 } : { x: playerState.position.x, y: playerState.position.y, z: playerState.position.z, yaw: playerState.yaw },
                 emitPositionYOffset: EMIT_POSITION_Y_OFFSET,
                 gamePhase: GAME_PHASE,
+                gameModeId: GAME_MODE,
                 // Optional passive-official structural parity fields. Disabled by
                 // default; enable with EVIO_OFFICIAL_BOOTSTRAP_FIELDS=1 for a
                 // one-variable experiment.
@@ -30512,6 +30676,11 @@ var EvioSim = (() => {
     resetSessionInputStream,
     tickMatch,
     startNewRound,
+    // survival game mode — exported for test_survival_mode.js. getSurvivalState is a getter, not
+    // the object directly, because resetSurvivalState REPLACES survivalState wholesale (same
+    // reasoning as getSessions()/getParityRings() above for other reassignable module state).
+    tickSurvivalWaves,
+    getSurvivalState: () => survivalState,
     handleClientSignal,
     creditKill,
     // live loadout/cosmetics push ('#EVL#')
