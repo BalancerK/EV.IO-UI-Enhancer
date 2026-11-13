@@ -9109,15 +9109,21 @@ let SURVIVAL_BASE_BOT_COUNT = S.define({
 }, (v) => { SURVIVAL_BASE_BOT_COUNT = v; });
 
 let SURVIVAL_BOT_COUNT_PER_WAVE = S.define({
-  key: "survivalBotCountPerWave", env: "EVIO_SURVIVAL_BOT_COUNT_PER_WAVE", type: "number", def: 0.5, min: 0, max: 10, step: 0.1,
+  key: "survivalBotCountPerWave", env: "EVIO_SURVIVAL_BOT_COUNT_PER_WAVE", type: "number", def: 1.5, min: 0, max: 20, step: 0.1,
   category: "Survival", label: "Bot count added per wave",
-  desc: "Fractional is fine — the target count is floored, so e.g. 0.5 adds one bot every other wave.",
+  desc: "Fractional is fine — the target count is floored, so e.g. 0.5 adds one bot every other "
+      + "wave. Raised from the original 0.5 default so waves actually feel like they're throwing "
+      + "more at you, per the user's own \"more bots per wave\" request.",
 }, (v) => { SURVIVAL_BOT_COUNT_PER_WAVE = v; });
 
 let SURVIVAL_MAX_BOT_COUNT = S.define({
-  key: "survivalMaxBotCount", env: "EVIO_SURVIVAL_MAX_BOT_COUNT", type: "int", def: 16, min: 1, max: 24,
+  key: "survivalMaxBotCount", env: "EVIO_SURVIVAL_MAX_BOT_COUNT", type: "int", def: 300, min: 1, max: 2000,
   category: "Survival", label: "Max bot count",
-  desc: "Hard cap on the escalating bot count, regardless of wave number.",
+  desc: "Requested as effectively \"no limit\" — raised from the original 16/24 ceiling to a "
+      + "number no realistic session reaches (even at the default +1.5/wave, a 2-hour run at "
+      + "25s/wave only reaches ~430 bots), while still bounding it SOMEWHERE so a server literally "
+      + "left running for days doesn't try to simulate an unbounded bot count. Lower this if your "
+      + "hardware can't hold that many live bots.",
 }, (v) => { SURVIVAL_MAX_BOT_COUNT = v; });
 
 let SURVIVAL_LEVEL_UP_EVERY_N_WAVES = S.define({
@@ -9129,10 +9135,22 @@ let SURVIVAL_LEVEL_UP_EVERY_N_WAVES = S.define({
 let SURVIVAL_BOSS_EVERY_N_WAVES = S.define({
   key: "survivalBossEveryNWaves", env: "EVIO_SURVIVAL_BOSS_EVERY_N_WAVES", type: "int", def: 5, min: 1, max: 100,
   category: "Survival", label: "Boss every N waves",
-  desc: "A single tankier bot (see survivalBossDamageResist) spawns on top of the normal wave "
-      + "bots every N waves — at most one alive at a time; the next one only spawns once this "
-      + "one is dead/gone.",
+  desc: "A tankier bot (see survivalBossDamageResist) spawns on top of the normal wave bots "
+      + "every N waves — see survivalMaxSimultaneousBosses for how many can be alive at once.",
 }, (v) => { SURVIVAL_BOSS_EVERY_N_WAVES = v; });
+
+let SURVIVAL_MULTI_BOSS_EVERY_N_WAVES = S.define({
+  key: "survivalMultiBossEveryNWaves", env: "EVIO_SURVIVAL_MULTI_BOSS_EVERY_N_WAVES", type: "int", def: 20, min: 1, max: 500,
+  category: "Survival", label: "One more simultaneous boss every N waves",
+  desc: "A single boss plateaus a long run — past the first boss wave, one more boss joins the "
+      + "fight for every N further waves (capped at survivalMaxSimultaneousBosses), so a "
+      + "multi-hour session keeps escalating instead of settling into a fixed rhythm.",
+}, (v) => { SURVIVAL_MULTI_BOSS_EVERY_N_WAVES = v; });
+
+let SURVIVAL_MAX_SIMULTANEOUS_BOSSES = S.define({
+  key: "survivalMaxSimultaneousBosses", env: "EVIO_SURVIVAL_MAX_SIMULTANEOUS_BOSSES", type: "int", def: 4, min: 1, max: 20,
+  category: "Survival", label: "Max simultaneous bosses",
+}, (v) => { SURVIVAL_MAX_SIMULTANEOUS_BOSSES = v; });
 
 let SURVIVAL_BOSS_DAMAGE_RESIST = S.define({
   key: "survivalBossDamageResist", env: "EVIO_SURVIVAL_BOSS_DAMAGE_RESIST", type: "number", def: 0.2, min: 0.01, max: 1, step: 0.01,
@@ -9282,11 +9300,36 @@ const SPECIAL_WAVE_TYPES = [
 
 let SURVIVAL_SPECIAL_WAVE_CHANCE = S.define({
   key: "survivalSpecialWaveChance", env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE", type: "number", def: 0.3, min: 0, max: 1, step: 0.05,
-  category: "Survival", label: "Special wave chance (per eligible wave)",
-  desc: "Odds a NEW wave (past minWave=5) rolls as a special wave instead of a normal one. The "
-      + "real client's own exact trigger cadence couldn't be confirmed from bundle analysis — "
-      + "this is our own reasonable choice, not a reverse-engineered constant.",
+  category: "Survival", label: "Special wave chance (base, at minWave)",
+  desc: "Odds a NEW wave (past minWave=5) rolls as a special wave instead of a normal one, AT "
+      + "the wave it first becomes eligible — see survivalSpecialWaveChanceRampPerWave for how "
+      + "this climbs deeper into a run. The real client's own exact trigger cadence couldn't be "
+      + "confirmed from bundle analysis — this is our own reasonable choice, not a "
+      + "reverse-engineered constant.",
 }, (v) => { SURVIVAL_SPECIAL_WAVE_CHANCE = v; });
+
+let SURVIVAL_SPECIAL_WAVE_CHANCE_RAMP = S.define({
+  key: "survivalSpecialWaveChanceRampPerWave", env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE_RAMP", type: "number", def: 0.01, min: 0, max: 0.1, step: 0.005,
+  category: "Survival", label: "Special wave chance ramp (+ per wave)",
+  desc: "Added to the base special-wave chance for every wave past minWave, capped at "
+      + "survivalSpecialWaveChanceMax — a run that goes on for an hour should feel like special "
+      + "waves are coming thick and fast by the end, not stay stuck at the wave-5 rate forever.",
+}, (v) => { SURVIVAL_SPECIAL_WAVE_CHANCE_RAMP = v; });
+
+let SURVIVAL_SPECIAL_WAVE_CHANCE_MAX = S.define({
+  key: "survivalSpecialWaveChanceMax", env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE_MAX", type: "number", def: 0.75, min: 0, max: 1, step: 0.05,
+  category: "Survival", label: "Special wave chance ceiling",
+  desc: "The ramp above never pushes the chance past this — leaves SOME normal waves even very "
+      + "deep into a run, rather than every wave eventually becoming a special one.",
+}, (v) => { SURVIVAL_SPECIAL_WAVE_CHANCE_MAX = v; });
+
+// Base chance + a per-wave ramp past the special waves' own minWave, capped — see the three
+// settings above. minWaveForRamp defaults to the FIRST special wave's minWave (5) since that's
+// the earliest point any of this matters.
+function _survivalSpecialWaveChanceForWave(wave, minWave) {
+  const past = Math.max(0, wave - minWave);
+  return Math.min(SURVIVAL_SPECIAL_WAVE_CHANCE_MAX, SURVIVAL_SPECIAL_WAVE_CHANCE + past * SURVIVAL_SPECIAL_WAVE_CHANCE_RAMP);
+}
 
 function pickSpecialWaveType() {
   const total = SPECIAL_WAVE_TYPES.reduce((sum, w) => sum + w.weight, 0);
@@ -9374,10 +9417,10 @@ function _rollPickupItem() {
 // No waveStartTick of its own — match.roundStartTick (opcode 298) IS that anchor, the same one
 // the client's own wave-number formula uses, so our escalation and the client's independently-
 // computed HUD text can never drift apart.
-let survivalState = { currentWave: -1, bossPlayerId: null, activeSpecialWave: null };
+let survivalState = { currentWave: -1, bossPlayerIds: [], activeSpecialWave: null };
 
 function resetSurvivalState() {
-  survivalState = { currentWave: -1, bossPlayerId: null, activeSpecialWave: null };
+  survivalState = { currentWave: -1, bossPlayerIds: [], activeSpecialWave: null };
 }
 
 // Forces a bot onto the given weapon — same shape as spawnBot's own weapon-equip block, just
@@ -9460,8 +9503,10 @@ function tickSurvivalWaves(sessions) {
   // Re-applied to every survival bot (new AND existing) on every wave boundary, whether this
   // wave rolled a special type or not — that one assignment naturally both applies a forced
   // weapon when one starts and reverts everyone to the default weapon when it ends, with no
-  // separate "end of special wave" bookkeeping needed.
-  survivalState.activeSpecialWave = (wave >= 1 && Math.random() < SURVIVAL_SPECIAL_WAVE_CHANCE)
+  // separate "end of special wave" bookkeeping needed. The chance itself RAMPS with wave number
+  // (see _survivalSpecialWaveChanceForWave) — a run that goes on for an hour should feel like
+  // special waves come thicker and faster deep in, not stay stuck at the wave-5 rate forever.
+  survivalState.activeSpecialWave = (wave >= 1 && Math.random() < _survivalSpecialWaveChanceForWave(wave, 5))
     ? pickSpecialWaveType() : null;
   // A melee bot's OWN default is the sword, not the gun — reverting it to a flat weaponId 4
   // whenever no special wave is active would silently strip its melee loadout every wave. Only
@@ -9481,8 +9526,16 @@ function tickSurvivalWaves(sessions) {
   }
 
   if (wave >= 1 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
-    const bossAlive = survivalState.bossPlayerId && sessions.get(survivalState.bossPlayerId);
-    if (!bossAlive) {
+    if (!Array.isArray(survivalState.bossPlayerIds)) survivalState.bossPlayerIds = [];
+    survivalState.bossPlayerIds = survivalState.bossPlayerIds.filter((id) => sessions.get(id));
+    // Deep into a long run, more than one boss fights alongside each other — a flat "wait for
+    // the one boss to die" pace would never escalate again past whatever wave first introduced
+    // it, which is exactly the kind of multi-hour plateau this is meant to avoid. Scales slowly
+    // (every survivalMultiBossEveryNWaves waves adds one) and caps at
+    // survivalMaxSimultaneousBosses.
+    const desiredBossCount = Math.min(SURVIVAL_MAX_SIMULTANEOUS_BOSSES,
+      1 + Math.floor(wave / SURVIVAL_MULTI_BOSS_EVERY_N_WAVES));
+    while (survivalState.bossPlayerIds.length < desiredBossCount) {
       // Random name + skin per boss spawn, matching the "slightly bigger" look confirmed from
       // the real client's own bossScale gamemode constant — see spawnBot's own comment for how
       // these three opts get applied.
@@ -9492,8 +9545,9 @@ function tickSurvivalWaves(sessions) {
         level: 10, isSurvivalBot: true, isBoss: true, name: bossName,
         skinUrl: bossSkin.skinUrl, thumbUrl: bossSkin.thumbUrl, modelScale: SURVIVAL_BOSS_SCALE,
       });
-      survivalState.bossPlayerId = boss.playerId;
-      console.log(`[evio-local] survival: wave ${wave} boss spawned (${boss.playerId})`);
+      survivalState.bossPlayerIds.push(boss.playerId);
+      console.log(`[evio-local] survival: wave ${wave} boss spawned (${boss.playerId}, `
+        + `${survivalState.bossPlayerIds.length}/${desiredBossCount} active)`);
     }
   }
   console.log(`[evio-local] survival: wave ${wave} — bots=${targetCount} level=${targetLevel}`);

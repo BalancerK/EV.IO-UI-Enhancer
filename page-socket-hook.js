@@ -497,15 +497,24 @@
     // instead of letting the server's (intentionally minimal) per-tick body wipe them — see the
     // userscript's own identical comment on 6b8 for why this is needed at all (no opcode carries
     // these fields, so a wholesale state swap zeros them with nothing to restore them from).
+    // Re-matched against ev.io 1-7-1's own now-readable property names. pitch/pitchOffset and
+    // weapons (ex-Qwf7j5k — confirmed by tracing its own resolveEquippedWeapon-equivalent call
+    // chain, "t.Q2cwf0f.Qwxfmx5(e.Qwf7j5k)" in 1-7-0, to the identical shape "t.weapons[t.
+    // equippedWeaponId]" in 1-7-1) are HIGH confidence — found by exact structural tracing, not
+    // guessed. The three recoil accumulators (ex-Qq1azjr/Qq1azd5/Qm2pxgr) are MODERATE confidence:
+    // they have no opcode and no equivalent call-chain to trace, so these are the client's own
+    // unopcode'd, camera-recoil-shaped fields found nearest pitch/pitchOffset in the same default
+    // player-state object (camKnockbackMin/camKnockbackMax/yOffsetStack) — real properties,
+    // plausible by name and position, but not confirmed field-for-field like the two above.
     window.__EVIO_EXT_PRESERVE_RECON__ = function (oldState, newState) {
         try {
             if (window.__EVIO_EXT_CUSTOM__.enabled && oldState && newState) {
-                newState.Qcrzrpr = oldState.Qcrzrpr;
-                newState.Qd0yy90 = oldState.Qd0yy90;
-                newState.Qq1azjr = oldState.Qq1azjr;
-                newState.Qq1azd5 = oldState.Qq1azd5;
-                newState.Qm2pxgr = oldState.Qm2pxgr;
-                if (oldState.Qwf7j5k) newState.Qwf7j5k = oldState.Qwf7j5k;
+                newState.pitch = oldState.pitch;
+                newState.pitchOffset = oldState.pitchOffset;
+                newState.camKnockbackMin = oldState.camKnockbackMin;
+                newState.camKnockbackMax = oldState.camKnockbackMax;
+                newState.yOffsetStack = oldState.yOffsetStack;
+                if (oldState.weapons) newState.weapons = oldState.weapons;
             }
         } catch (e) { /* ignore */ }
         return newState;
@@ -525,31 +534,39 @@
         } catch (e) { /* ignore */ }
     };
 
+    // Re-matched against ev.io 1-7-1 (the client bundle was fully re-obfuscated — every one of
+    // these anchors previously used the 1-7-0 build's Q-identifiers, which no longer exist at
+    // all in 1-7-1; confirmed 0/5 matching before this update). Found by locating each patch's
+    // SAME logic by its still-literal strings (e.g. the "pitch  =>  Server:" debug text) or
+    // structural shape in the live 1-7-1 bundle, then reading off its now much more readable
+    // real property/variable names. If a future ev.io build breaks these again, the same
+    // approach — grep the new bundle for a patch's own literal strings first — is the fastest
+    // way back in.
     const patches = [
         {
             name: '6b7 custom-mode: skip pitch + pitchOffset (production comparator)',
-            from: 'Math.abs(e.Qcrzrpr-t.Qcrzrpr)>1e-4||Math.abs(e.Qd0yy90-t.Qd0yy90)>1e-4||',
-            to:   '(!(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)&&(Math.abs(e.Qcrzrpr-t.Qcrzrpr)>1e-4||Math.abs(e.Qd0yy90-t.Qd0yy90)>1e-4))||',
+            from: 'Math.abs(e.pitch-t.pitch)>1e-4||Math.abs(e.pitchOffset-t.pitchOffset)>1e-4||',
+            to:   '(!(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)&&(Math.abs(e.pitch-t.pitch)>1e-4||Math.abs(e.pitchOffset-t.pitchOffset)>1e-4))||',
         },
         {
             name: '6b9 custom-mode: skip pitch + pitchOffset in the DEBUG comparator (the live one)',
-            from: "Math.abs(e.Qcrzrpr-t.Qcrzrpr)>1e-4&&n.push('pitch  =>  Server: '+JSON.stringify(e.Qcrzrpr)+'   Client: '+JSON.stringify(t.Qcrzrpr)),Math.abs(e.Qd0yy90-t.Qd0yy90)>1e-4&&n.push('pitchOffset  =>  Server: '+JSON.stringify(e.Qd0yy90)+'   Client: '+JSON.stringify(t.Qd0yy90)),",
-            to:   "!(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)&&(Math.abs(e.Qcrzrpr-t.Qcrzrpr)>1e-4&&n.push('pitch  =>  Server: '+JSON.stringify(e.Qcrzrpr)+'   Client: '+JSON.stringify(t.Qcrzrpr)),Math.abs(e.Qd0yy90-t.Qd0yy90)>1e-4&&n.push('pitchOffset  =>  Server: '+JSON.stringify(e.Qd0yy90)+'   Client: '+JSON.stringify(t.Qd0yy90))),",
+            from: "Math.abs(e.pitch-t.pitch)>1e-4&&a.push('pitch  =>  Server: '+JSON.stringify(e.pitch)+'   Client: '+JSON.stringify(t.pitch)),Math.abs(e.pitchOffset-t.pitchOffset)>1e-4&&a.push('pitchOffset  =>  Server: '+JSON.stringify(e.pitchOffset)+'   Client: '+JSON.stringify(t.pitchOffset)),",
+            to:   "!(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)&&(Math.abs(e.pitch-t.pitch)>1e-4&&a.push('pitch  =>  Server: '+JSON.stringify(e.pitch)+'   Client: '+JSON.stringify(t.pitch)),Math.abs(e.pitchOffset-t.pitchOffset)>1e-4&&a.push('pitchOffset  =>  Server: '+JSON.stringify(e.pitchOffset)+'   Client: '+JSON.stringify(t.pitchOffset))),",
         },
         {
             name: '6b8 custom-mode: preserve recoil + ammo through reconcile reset',
-            from: 'this.Qxo2o14[t].Qt03jhz.Qcvr9bt=this.Qh23rk3.Q820rrc(e.body)',
-            to:   'this.Qxo2o14[t].Qt03jhz.Qcvr9bt=(window.__EVIO_EXT_PRESERVE_RECON__?window.__EVIO_EXT_PRESERVE_RECON__(this.Qxo2o14[t].Qt03jhz.Qcvr9bt,this.Qh23rk3.Q820rrc(e.body)):this.Qh23rk3.Q820rrc(e.body))',
+            from: 'this.tickHistory[t].clientState.inner=this.sessionHandler.takeServerState(e.body)',
+            to:   'this.tickHistory[t].clientState.inner=(window.__EVIO_EXT_PRESERVE_RECON__?window.__EVIO_EXT_PRESERVE_RECON__(this.tickHistory[t].clientState.inner,this.sessionHandler.takeServerState(e.body)):this.sessionHandler.takeServerState(e.body))',
         },
         {
             name: 'CH1 custom-mode: send all chat over the game socket (social is dead)',
-            from: "a.includes('/examine')||a.includes('/dance'))lb.Ql1g6nk.Qam4u9w.Qm0eht4({msg:a})",
-            to:   "(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)||a.includes('/examine')||a.includes('/dance'))lb.Ql1g6nk.Qam4u9w.Qm0eht4({msg:a})",
+            from: "i.includes('/examine')||i.includes('/dance'))ub.ConnectionActions.instance.sendChatMessage({msg:i})",
+            to:   "(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)||i.includes('/examine')||i.includes('/dance'))ub.ConnectionActions.instance.sendChatMessage({msg:i})",
         },
         {
             name: 'SR1 forward exact shot ray + sessionId to custom server',
-            from: "u.push({Q7q6byi:f+':'+p+':'+a,Q616y7o:0,Qxluan:p,Qtql1ud:l.clone(),Qsjaj00:v,",
-            to:   "(window.__EVIO_EXT_SHOTRAY__&&window.__EVIO_EXT_SHOTRAY__(l,v,f+':'+p+':'+a)),u.push({Q7q6byi:f+':'+p+':'+a,Q616y7o:0,Qxluan:p,Qtql1ud:l.clone(),Qsjaj00:v,",
+            from: "u.push({id:f+':'+h+':'+i,eventAge:0,ownerId:h,origin:l.clone(),direction:y,",
+            to:   "(window.__EVIO_EXT_SHOTRAY__&&window.__EVIO_EXT_SHOTRAY__(l,y,f+':'+h+':'+i)),u.push({id:f+':'+h+':'+i,eventAge:0,ownerId:h,origin:l.clone(),direction:y,",
         },
     ];
 

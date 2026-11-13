@@ -1,4 +1,62 @@
+// ── Survival "best time" — our own implementation ───────────────────────────────────────────
+// The real client's own "Your Best time"/"New best time!" text (#roundCountdown .bestTimeP)
+// compares elapsed round time against a value it only ever gets from the player's REAL ev.io
+// account (a network fetch — the same one failing as "Failed to fetch" on a custom/local server
+// with no account backend reachable). That value never loads here, stays at its default, and
+// every run trivially "beats" it — which is why it always says "New best time!" regardless of
+// how long the player actually survived. We can't fix the official code (it's the real bundle,
+// not ours), so this replaces its output with our own correct version: track elapsed time
+// ourselves from the wave number already on screen, keep the real record in localStorage
+// (scoped per ?evioCustom= lobby code, so different custom lobbies don't share one record), and
+// overwrite the paragraph's text/class right after each HUD rebuild — same "observe then patch"
+// pattern applyHudAdjustments itself already uses for every other post-load DOM fixup here.
+let _survivalBestTimeRoundStartMs = null;
+let _survivalBestTimeLastWave = null;
+function _survivalBestTimeFormat(totalSeconds) {
+    const s = Math.max(0, Math.floor(totalSeconds));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    const mm = String(m).padStart(h > 0 ? 2 : 1, '0');
+    const ss = String(sec).padStart(2, '0');
+    return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${mm}:${ss}`;
+}
+function applySurvivalBestTime() {
+    try {
+        const bestP = document.querySelector('#roundCountdown .bestTimeP');
+        const waveP = document.querySelector('#roundCountdown .nextWaveP');
+        if (!bestP || !waveP) { _survivalBestTimeRoundStartMs = null; _survivalBestTimeLastWave = null; return; }
+
+        const m = waveP.textContent.match(/-?\d+/);
+        if (!m) return;
+        const wave = parseInt(m[0], 10);
+
+        // A wave number LOWER than the last one we saw means a new round just started (our own
+        // server always resets to the wave-0 grace period on a fresh round) — re-anchor our own
+        // elapsed-time clock. First-ever sighting also anchors (best-effort baseline if the page
+        // loaded mid-round).
+        if (_survivalBestTimeRoundStartMs === null || (_survivalBestTimeLastWave !== null && wave < _survivalBestTimeLastWave)) {
+            _survivalBestTimeRoundStartMs = Date.now();
+        }
+        _survivalBestTimeLastWave = wave;
+
+        const lobbyCode = new URLSearchParams(location.search).get('evioCustom') || 'default';
+        const storageKey = `evio_custom_survival_best_${lobbyCode}`;
+        const elapsedSeconds = (Date.now() - _survivalBestTimeRoundStartMs) / 1000;
+        let bestSeconds = 0;
+        try { bestSeconds = parseFloat(localStorage.getItem(storageKey)) || 0; } catch (e) { /* ignore */ }
+
+        if (elapsedSeconds > bestSeconds) {
+            try { localStorage.setItem(storageKey, String(elapsedSeconds)); } catch (e) { /* ignore (private mode, quota, etc.) */ }
+            bestP.textContent = 'New best time!';
+            bestP.classList.add('newBest');
+        } else {
+            bestP.textContent = `Your Best time: ${_survivalBestTimeFormat(bestSeconds)}`;
+            bestP.classList.remove('newBest');
+        }
+    } catch (e) { /* never let a HUD patch take down the page */ }
+}
+
 function applyHudAdjustments(){
+    applySurvivalBestTime();
     const selectors = ['#canvas','#canvas2','#game_hud','#game_menu_overlay','#lobbyBG','#fracSurPWDiv'];
     selectors.forEach(sel => {
         const el = document.querySelector(sel);
@@ -20,8 +78,10 @@ function applyHudAdjustments(){
         weapons.style.setProperty('transition','transform 0.3s ease','important');
     }
 
-    const adv = document.getElementById('ad_728');
-    if(adv) adv.remove();
+    // Ad-removal patch DROPPED (ev.io 1-7-1): the old #ad_728 banner + the CSS reserving a 90px
+    // footer for it are both gone from the real page now. The new ad system (Freestar,
+    // #freestar-leaderboard) ships `hidden` by default and the site's own layout is already
+    // full-height with no ad-reserved space — nothing left here for us to remove or work around.
 
     const crosshair = document.getElementById('canvas_crosshair');
     if (crosshair) {
@@ -528,6 +588,18 @@ window.addEventListener('load', () => {
     font-size: 13px;
     opacity: 0.7;
     padding: 8px 0;
+}
+
+/* #ev-priv-dropdown-wrapper reuses the site's own .dropdown/.dropdown-toggle/.dropdown-menu
+   markup (same as the PROFILE/Store/Social/Crypto top-bar menus) so it matches ev.io's theme
+   exactly — this just adds a HOVER reveal on top of it, since the native button underneath
+   isn't wired to Bootstrap's own click-toggle dropdown JS (and shouldn't be — see
+   installTopBarButton's own comment on leaving its native click handler untouched). */
+#ev-priv-dropdown-wrapper .dropdown-menu {
+    display: none;
+}
+#ev-priv-dropdown-wrapper:hover .dropdown-menu {
+    display: block;
 }
     `);
 
@@ -1790,23 +1862,57 @@ async function refreshPlayerCounts() {
 
         btn.addEventListener('click', () => openLobbyBrowser());
 
-        // Repurpose the native "Private" button to open our self-hosting menu, since a private
-        // self-hosted lobby IS what this site's own "create a private game" concept maps onto
-        // now. cloneNode + replace strips any addEventListener-attached native click handler
-        // (clone carries attributes/classes but never JS listeners) without touching its
-        // visuals — our own listener is then the only one left on the button.
+        // The native "Private" button is left COMPLETELY untouched now — ev.io's own private-game
+        // menu is back (confirmed real: 1-7-1 ships the "Private Game" panel again), so clicking
+        // the button directly still does exactly what it always did. We only ADD a hover dropdown
+        // around it — same Bootstrap dropdown/dropdown-toggle/dropdown-menu markup the site's own
+        // PROFILE/Store/Social/Crypto top-bar menus already use (see evio.html) — offering an
+        // explicit choice between that native flow and our own self-hosted lobby.
         if (privBtn && !privBtn.dataset.evioRewired) {
-            const replacement = privBtn.cloneNode(true);
-            replacement.dataset.evioRewired = '1';
-            // "Private" is the site's own original label; "CUSTOM LOBBY" says what this button
-            // now actually opens. Plain text node (confirmed against the real page's own markup),
-            // so textContent is enough — but it also carries the site's "translate-me" class,
-            // which its own i18n system could re-render and overwrite our label with a translated
-            // "Private" later. Drop the class so nothing but us ever touches this button's text again.
-            replacement.classList.remove('translate-me');
-            replacement.textContent = 'CUSTOM LOBBY';
-            privBtn.parentNode.replaceChild(replacement, privBtn);
-            replacement.addEventListener('click', () => openHostingMenu());
+            privBtn.dataset.evioRewired = '1';
+
+            const privWrapper = document.createElement('div');
+            privWrapper.id = 'ev-priv-dropdown-wrapper';
+            privWrapper.className = 'dropdown';
+
+            privBtn.parentNode.insertBefore(privWrapper, privBtn);
+            privWrapper.appendChild(privBtn);
+
+            const caret = document.createElement('span');
+            caret.className = 'caret';
+            privBtn.appendChild(caret);
+
+            const menu = document.createElement('ul');
+            menu.className = 'dropdown-menu';
+
+            // "Official" just re-fires a real click on the untouched button — the site's own
+            // handler runs exactly as if this dropdown never existed. Not a duplicate of the
+            // button's own click (the button itself keeps working too, e.g. for anyone who
+            // clicks straight through without hovering) — this is the explicit, same-outcome
+            // choice the hover menu offers.
+            const officialItem = document.createElement('li');
+            const officialLink = document.createElement('a');
+            officialLink.href = '#';
+            officialLink.textContent = 'Official';
+            officialLink.addEventListener('click', (e) => {
+                e.preventDefault();
+                privBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            });
+            officialItem.appendChild(officialLink);
+
+            const customItem = document.createElement('li');
+            const customLink = document.createElement('a');
+            customLink.href = '#';
+            customLink.textContent = 'Custom';
+            customLink.addEventListener('click', (e) => {
+                e.preventDefault();
+                openHostingMenu();
+            });
+            customItem.appendChild(customLink);
+
+            menu.appendChild(officialItem);
+            menu.appendChild(customItem);
+            privWrapper.appendChild(menu);
         }
 
         return true;
