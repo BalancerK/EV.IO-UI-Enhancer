@@ -1748,33 +1748,54 @@ window.addEventListener('load', () => {
 }
 
 
-    // ----------------- load from bundle.js -----------------
+    // ----------------- load from the live matchmaker -----------------
+
+    // ev.io 1-7-1 moved the lobby list from a static JSON array embedded in bundle.js (which the
+    // old regex above scraped) to a runtime matchmaker API — the client itself calls GET
+    // {region.httpUrl}/matchmaker/rooms per region and merges the results (confirmed from the
+    // bundle's own listAllLobbies()/createLobby()/fetchLobbyById() SDK wrappers). The region URLs
+    // themselves are NOT fetched at runtime — zd.SHARED_CONFIG.matchmakerRegions ships as a
+    // literal object baked into the bundle at build time (the *.example.com addresses you'd find
+    // searching the bundle text are just the dev-mode fallback; this is the real override). Pulled
+    // directly from the live bundle and confirmed working with a plain unauthenticated GET
+    // (Access-Control-Allow-Origin: * — no CORS issue, unlike the per-lobby /players endpoint
+    // below). If ev.io migrates hosts again this list is the first thing to re-check.
+    const MATCHMAKER_REGIONS = [
+        { id: 'atl', name: 'NA East', httpUrl: 'https://ev-game-na.159.65.175.174.sslip.io' },
+        { id: 'fra', name: 'Europe', httpUrl: 'https://ev-game-eu.139.59.151.96.sslip.io' },
+        { id: 'sin', name: 'Asia', httpUrl: 'https://ev-game-asia.188.166.184.152.sslip.io' },
+    ];
 
     async function loadLobbiesFromBundle() {
         if (lobbiesLoaded || lobbiesLoading) return;
         lobbiesLoading = true;
 
         try {
-            const meta = document.getElementById('dist_path_meta');
-            const distPath = meta && meta.content ? meta.content : '/dist/1-7-0/public/';
-            const bundleUrl = distPath.replace(/\/+$/, '/') + 'bundle.js';
+            const results = await Promise.allSettled(
+                MATCHMAKER_REGIONS.map((region) =>
+                    fetch(`${region.httpUrl}/matchmaker/rooms`).then((r) => r.json())
+                )
+            );
 
-            const text = await fetch(bundleUrl).then(r => r.text());
+            const data = [];
+            let anyOk = false;
+            results.forEach((res) => {
+                if (res.status === 'fulfilled' && Array.isArray(res.value)) {
+                    anyOk = true;
+                    data.push(...res.value);
+                } else if (res.status === 'rejected') {
+                    console.warn('[ev-lobbies] A matchmaker region failed to load:', res.reason);
+                }
+            });
 
-            const re = /parse\('(\[{"id":"lobby-[\s\S]*?}])'\)/;
-            const m = text.match(re);
-            if (!m) {
-                console.warn('[ev-lobbies] Could not find lobby array in bundle.js');
-                setStatus('Could not locate lobby list in game files.');
+            if (!anyOk) {
+                console.warn('[ev-lobbies] Could not reach any matchmaker region');
+                setStatus('Could not load lobby list (matchmaker unreachable).');
                 return;
             }
 
-            const jsonStr = m[1];
-            const data = JSON.parse(jsonStr);
-
-            if (!Array.isArray(data) || !data.length) {
+            if (!data.length) {
                 setStatus('Lobby list is empty.');
-                return;
             }
 
             LOBBIES = data;
@@ -1783,7 +1804,7 @@ window.addEventListener('load', () => {
             renderLobbyList();
             refreshPlayerCounts();
         } catch (err) {
-            console.error('[ev-lobbies] Error loading lobbies from bundle:', err);
+            console.error('[ev-lobbies] Error loading lobbies from matchmaker:', err);
             setStatus('Error loading lobby list.');
         } finally {
             lobbiesLoading = false;

@@ -37,7 +37,15 @@
     function isEvioGameSocket(url) {
         if (typeof url !== 'string') return false;
         if (isEvioSocialSocket(url)) return false;
-        return /wss?:\/\/evio-[^/]+\.rivet\.game\/?/i.test(url) || /wss?:\/\/evio-[^/]+/i.test(url);
+        // ev.io's game-socket host has moved at least once: the old rivet.game-hosted "evio-*"
+        // subdomains, and the current (1-7-1) production host, sslip.io-based "ev-game-*"
+        // subdomains (confirmed live region hosts: ev-game-na/-eu/-asia.<ip>.sslip.io — see
+        // zd.SHARED_CONFIG.matchmakerRegions in the live bundle). Matching only the old pattern
+        // here silently broke custom-lobby routing entirely once the real client moved off
+        // rivet.game, since RoutedWebSocket below never recognized the new URL as a game socket.
+        return /wss?:\/\/evio-[^/]+\.rivet\.game\/?/i.test(url)
+            || /wss?:\/\/ev-game-[^/]+\.sslip\.io\/?/i.test(url)
+            || /wss?:\/\/evio-[^/]+/i.test(url);
     }
 
     // ── Identity/loadout/skin bridge ──────────────────────────────────────────────────────────
