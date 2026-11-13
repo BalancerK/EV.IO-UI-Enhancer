@@ -651,6 +651,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.type === 'openAdmin') {
         // content.js runs in an isolated world with no chrome.tabs access, hence the round trip.
+        // NOTE: .create() (like most chrome.tabs.* methods) works without the "tabs" permission —
+        // that permission only gates reading sensitive per-tab info (url/title/favIconUrl) via
+        // query()/get()/events. Don't add "tabs" back to manifest.json for this call; the Chrome
+        // Web Store review flagged it as an unused-permission violation once before (v3.2).
         chrome.tabs.create({ url: chrome.runtime.getURL('admin.html') });
         sendResponse({ ok: true });
         return true;
