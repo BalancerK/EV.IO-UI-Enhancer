@@ -380,7 +380,16 @@ function buildFirstSpawnBody(options = {}) {
     // 239 Qqw6dra = isBoss. Drives the "Kill the boss!" HUD text and the boss HP-bar overlay —
     // also hardcoded false before.
     239, !!options.isBoss,
-    240, false,
+    // 240 = isZombie. Was hardcoded false for every entity, same as isBot/isBoss used to be —
+    // confirmed from the live bundle this drives the ZOMBIE_RUN animation (instead of the normal
+    // run cycle), the 'zombie_death' sound on death (instead of the normal one), and the
+    // zombie-specific idle/sprint animation selection. Equipping the Zombie Melee weapon + zombie
+    // skin alone was never enough; without this flag the client still animates/sounds them like
+    // an ordinary (if oddly-equipped) human bot. NOT gated on isInfection — that only controls
+    // the bundle's OWN automatic zombie-skin override (irrelevant here, we already send the skin
+    // explicitly via the cosmetics roster) — the animation/sound reads are unconditional on this
+    // flag alone.
+    240, !!options.isZombie,
     241, null,
     242, 0,
     243, 1,

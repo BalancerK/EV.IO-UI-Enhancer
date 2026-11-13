@@ -8012,11 +8012,12 @@ function buildPeerBootstrapDelta(peer) {
     gamePhase: GAME_PHASE,
     gameModeId: GAME_MODE,
     roundStartTick: match.roundStartTick,
-    // 237/239 — see spawnBot's own isSurvivalBot/isBoss comment. A peer's bot/boss status is
-    // part of their identity, same tier as their weapon/clan, so it belongs in this one shared
-    // peer-introduction builder, not duplicated per call site.
+    // 237/239/240 — see spawnBot's own isSurvivalBot/isBoss/isZombie comment. A peer's bot/boss/
+    // zombie status is part of their identity, same tier as their weapon/clan, so it belongs in
+    // this one shared peer-introduction builder, not duplicated per call site.
     isBot: !!peer.isBot,
     isBoss: !!peer.isBoss,
+    isZombie: !!peer.isZombie,
     // 238 — see state_builder.js's own comment on the dual bot-level/boss-reward meaning.
     botLevel: peer.botLevel,
     bossReward: SURVIVAL_BOSS_REWARD,
@@ -10399,6 +10400,7 @@ function startServer() {
           roundStartTick: match.roundStartTick,
           isBot: !!s.isBot,
           isBoss: !!s.isBoss,
+          isZombie: !!s.isZombie,
           botLevel: s.botLevel,
           bossReward: SURVIVAL_BOSS_REWARD,
           modelScale: s.playerState ? s.playerState.modelScale : 1,
@@ -10955,6 +10957,12 @@ function startServer() {
       // A boss takes reduced damage (survivalBossDamageResist in applyDamage) rather than an
       // inflated HP pool — healthPoints is normalized 0..1, see tickSurvivalWaves' own comment.
       isBoss: !!opts.isBoss,
+      // Deliberately NOT the same as isSwordBot above — a plain deathmatch sword-only-mode bot
+      // is also isSwordBot but is NOT a zombie (normal human model, regular Sword weapon).
+      // opts.meleeBot is specifically survival's own zombie-melee bot. Drives opcode 240 (see
+      // state_builder.js's own comment) — the ZOMBIE_RUN animation and 'zombie_death' sound,
+      // neither of which fire just from the Zombie Melee weapon + zombie skin alone.
+      isZombie: !!opts.meleeBot,
       // 1-10, matching the official Bot Level UI.
       botLevel: Math.max(1, Math.min(10, Number.isFinite(opts.level) ? opts.level : 5)),
       sessionId, playerId, playerState,
