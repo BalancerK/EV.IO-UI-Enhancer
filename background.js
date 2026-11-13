@@ -1,30 +1,15 @@
-// background.js — player-count fetching AND player-hosted lobby signaling (netlib/WebRTC).
+// background.js — player-hosted lobby signaling (netlib/WebRTC).
 //
-// ── Player counts (existing) ───────────────────────────────────────────────────────────────
-// This has to happen here, not in content.js: a content script's fetch() runs in the PAGE's
-// security context (https://ev.io), so it's subject to the same CORS rules a page script would
-// be. Each lobby's evio-XXXXXXXX.rivet.game server doesn't send an Access-Control-Allow-Origin
-// header for https://ev.io, so a content-script fetch to it is blocked by the browser before any
-// response is even seen — no header the extension sets on its own request can fix that, since
-// it's the SERVER's response header that's missing.
-//
-// A background service worker's fetch is extension-privileged: for an origin covered by
-// host_permissions (see manifest.json's "https://*.rivet.game/*"), it isn't subject to the page's
-// CORS policy at all. So content.js sends a message here instead of fetching directly.
+// The per-lobby player-count feature that used to live here (an evio-XXXXXXXX.rivet.game
+// /players endpoint, fetched from here rather than content.js because the game server never
+// sent an Access-Control-Allow-Origin header for https://ev.io, and only an extension-privileged
+// background fetch bypasses that) is gone: ev.io 1-7-1 retired the whole per-lobby-subdomain
+// architecture that endpoint depended on, and there's no replacement — the new shared-host
+// matchmaker API has no player-count field at all (confirmed: not even official's own lobby
+// browser shows one any more). manifest.json's *.rivet.game host_permissions entry, which only
+// ever existed for this, is removed along with it.
 
-// Only ever fetch a *.rivet.game players endpoint — never an arbitrary URL a message might ask
-// for. Without this check, any page content.js runs on could, in principle, ask this worker to
-// fetch anything, using the extension's host_permissions as an open proxy.
-function isAllowedPlayersUrl(raw) {
-    let u;
-    try { u = new URL(raw); } catch (e) { return false; }
-    if (u.protocol !== 'https:') return false;
-    if (!/^[a-z0-9-]+\.rivet\.game$/i.test(u.hostname)) return false;
-    if (!u.pathname.endsWith('/players')) return false;
-    return true;
-}
-
-// ── Player-hosted lobbies (new) ─────────────────────────────────────────────────────────────
+// ── Player-hosted lobbies ────────────────────────────────────────────────────────────────────
 //
 // WHY THIS LIVES HERE, NOT IN content.js: two independent reasons.
 //
@@ -614,24 +599,6 @@ async function startHosting({ isPublic }) {
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (!msg || typeof msg.type !== 'string') return false;
-
-    if (msg.type === 'fetchPlayerCount') {
-        (async () => {
-            if (!isAllowedPlayersUrl(msg.url)) {
-                sendResponse({ ok: false, error: 'blocked: not a *.rivet.game /players URL' });
-                return;
-            }
-            try {
-                const res = await fetch(msg.url);
-                if (!res.ok) { sendResponse({ ok: false, error: 'http ' + res.status }); return; }
-                const data = await res.json();
-                sendResponse({ ok: true, data });
-            } catch (err) {
-                sendResponse({ ok: false, error: String((err && err.message) || err) });
-            }
-        })();
-        return true;
-    }
 
     if (msg.type === 'listCustomLobbies') {
         (async () => {

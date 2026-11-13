@@ -12,6 +12,7 @@
 // pattern applyHudAdjustments itself already uses for every other post-load DOM fixup here.
 let _survivalBestTimeRoundStartMs = null;
 let _survivalBestTimeLastWave = null;
+let _survivalBestTimeLastWrittenText = null; // breaks the MutationObserver feedback loop below
 function _survivalBestTimeFormat(totalSeconds) {
     const s = Math.max(0, Math.floor(totalSeconds));
     const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
@@ -23,7 +24,12 @@ function applySurvivalBestTime() {
     try {
         const bestP = document.querySelector('#roundCountdown .bestTimeP');
         const waveP = document.querySelector('#roundCountdown .nextWaveP');
-        if (!bestP || !waveP) { _survivalBestTimeRoundStartMs = null; _survivalBestTimeLastWave = null; return; }
+        if (!bestP || !waveP) {
+            _survivalBestTimeRoundStartMs = null;
+            _survivalBestTimeLastWave = null;
+            _survivalBestTimeLastWrittenText = null;
+            return;
+        }
 
         const m = waveP.textContent.match(/-?\d+/);
         if (!m) return;
@@ -44,14 +50,28 @@ function applySurvivalBestTime() {
         let bestSeconds = 0;
         try { bestSeconds = parseFloat(localStorage.getItem(storageKey)) || 0; } catch (e) { /* ignore */ }
 
+        let text, isNewBest;
         if (elapsedSeconds > bestSeconds) {
             try { localStorage.setItem(storageKey, String(elapsedSeconds)); } catch (e) { /* ignore (private mode, quota, etc.) */ }
-            bestP.textContent = 'New best time!';
-            bestP.classList.add('newBest');
+            text = 'New best time!';
+            isNewBest = true;
         } else {
-            bestP.textContent = `Your Best time: ${_survivalBestTimeFormat(bestSeconds)}`;
-            bestP.classList.remove('newBest');
+            text = `Your Best time: ${_survivalBestTimeFormat(bestSeconds)}`;
+            isNewBest = false;
         }
+
+        // applyHudAdjustments (which calls this) runs from a MutationObserver watching
+        // document.body's whole subtree for childList changes. `.textContent =` ALWAYS replaces
+        // a node's children — even when the new string equals the old one — so writing it
+        // unconditionally on every call re-triggers that same observer, which calls this again,
+        // which writes again, forever. In survival specifically the wave/HUD text underneath
+        // this already changes on close to every tick, so this was spinning the tab at 100% CPU
+        // (or worse) almost immediately after joining. Only touch the DOM when the text actually
+        // changes, so an unrelated mutation elsewhere stops propagating back through this one.
+        if (text === _survivalBestTimeLastWrittenText) return;
+        _survivalBestTimeLastWrittenText = text;
+        bestP.textContent = text;
+        bestP.classList.toggle('newBest', isNewBest);
     } catch (e) { /* never let a HUD patch take down the page */ }
 }
 
@@ -145,30 +165,9 @@ window.addEventListener('load', () => {
         return REGION_NAMES[code] || code.toUpperCase();
     }
 
-    // null = not measured yet, false = measured but unreachable, number = ms.
-    function regionLatencyLabel(code) {
-        if (!code || !(code in REGION_LATENCY)) return '';
-        const ms = REGION_LATENCY[code];
-        if (ms === null) return ' (unreachable)';
-        return ` (${ms}ms)`;
-    }
-
     // ----------------- CSS -----------------
 
     addStyle(`
-.ev-lobby-row.ev-lobby-active {
-    background: rgba(100, 255, 150, 0.05);
-    border-left: 3px solid #7dff7d;
-}
-
-.ev-lobby-row.ev-lobby-empty {
-    opacity: 0.65;
-}
-
-.ev-lobby-row.ev-lobby-active:hover {
-    background: rgba(100, 255, 150, 0.12);
-}
-
 #ev_lobbies_module.module_box.wide {
     position: fixed;
     top: 0;
@@ -241,17 +240,17 @@ window.addEventListener('load', () => {
     font-weight: 600;
     font-size: 19px;
 }
-.ev-lobby-players {
+.ev-lobby-latency {
     font-size: 17px;
     opacity: 0.9;
 }
-.ev-lobby-players.full {
+.ev-lobby-latency.full {
     color: #ff6969;
 }
-.ev-lobby-players.mid {
+.ev-lobby-latency.mid {
     color: #ffcf4d;
 }
-.ev-lobby-players.low {
+.ev-lobby-latency.low {
     color: #7dff7d;
 }
 
@@ -597,31 +596,9 @@ window.addEventListener('load', () => {
     // ----------------- global state -----------------
 
     let LOBBIES = null;
-    let PLAYER_INFO = {};
     let lobbiesLoaded = false;
     let lobbiesLoading = false;
-    let playerCountPollTimer = null;
     let REGION_LATENCY = {}; // region id -> ms, or null if unreachable
-
-    // Counts only auto-refreshed on open/reopen before this; now also polls every 5s while the
-    // panel is actually visible, so it doesn't drift stale if someone leaves it open. Fetches are
-    // already parallel per-lobby (see refreshPlayerCounts' Promise.allSettled), so 5s is bounded
-    // by Rivet's own response time, not anything serialized on our end.
-    const PLAYER_COUNT_POLL_MS = 5000;
-
-    function startPlayerCountPolling() {
-        stopPlayerCountPolling();
-        playerCountPollTimer = setInterval(() => {
-            if (lobbiesLoaded && !lobbiesLoading) refreshPlayerCounts();
-        }, PLAYER_COUNT_POLL_MS);
-    }
-
-    function stopPlayerCountPolling() {
-        if (playerCountPollTimer) {
-            clearInterval(playerCountPollTimer);
-            playerCountPollTimer = null;
-        }
-    }
 
     // ----------------- player-hosted lobbies -----------------
     // See background.js's own comment block for why hosting/signaling runs there, not here.
@@ -1384,7 +1361,6 @@ window.addEventListener('load', () => {
 
         close.addEventListener('click', () => {
             mod.style.display = 'none';
-            stopPlayerCountPolling();
             stopCustomLobbyPolling();
         });
 
@@ -1394,7 +1370,6 @@ window.addEventListener('load', () => {
         // (and fetching) with the panel invisible, exactly the background task to avoid.
         new MutationObserver(() => {
             if (mod.style.display === 'none') {
-                stopPlayerCountPolling();
                 stopCustomLobbyPolling();
             }
         }).observe(mod, { attributes: true, attributeFilter: ['style'] });
@@ -1416,9 +1391,6 @@ window.addEventListener('load', () => {
             mod.style.display = 'block';
         }
 
-        // Both lists poll together regardless of which tab is active, so switching tabs is
-        // instant (already-fresh data) rather than triggering a fetch-and-wait every time.
-        startPlayerCountPolling();
         startCustomLobbyPolling();
     }
 
@@ -1696,34 +1668,32 @@ window.addEventListener('load', () => {
 
         const name = document.createElement('div');
         name.className = 'ev-lobby-name';
-        name.textContent = `[${prettyRegion(lobby.region)}${regionLatencyLabel(lobby.region)}] ${prettyGamemode(lobby.gamemode)}`;
+        name.textContent = `[${prettyRegion(lobby.region)}] ${prettyGamemode(lobby.gamemode)}`;
 
-        const players = document.createElement('div');
-        players.className = 'ev-lobby-players';
+        // Player count removed — there's no endpoint left to back it (see refreshRegionLatency's
+        // own comment: the old per-lobby /players HTTP endpoint doesn't exist under 1-7-1's
+        // shared-host matchmaker architecture, and official's own lobby browser doesn't show a
+        // count either). Region latency takes its spot instead, reusing the exact same
+        // full/mid/low color scale that used to mean "crowded/busy/quiet" for player count —
+        // here low ms is good (green) the same way a low headcount used to be.
+        const latency = document.createElement('div');
+        latency.className = 'ev-lobby-latency';
 
-        const info = PLAYER_INFO[lobby.id];
-        let n = null;
-
-        if (!info || typeof info.count !== 'number') {
-            players.textContent = '… players';
-            row.classList.add('ev-lobby-empty');
+        const ms = REGION_LATENCY[lobby.region];
+        if (ms === undefined) {
+            latency.textContent = '… ms';
+        } else if (ms === null) {
+            latency.textContent = 'unreachable';
+            latency.classList.add('full');
         } else {
-            n = info.count;
-            players.textContent = `${n} player${n === 1 ? '' : 's'}`;
-
-            if (n >= 11) players.classList.add('full');
-            else if (n >= 6) players.classList.add('mid');
-            else players.classList.add('low');
-
-            if (n > 0) {
-                row.classList.add('ev-lobby-active');
-            } else {
-                row.classList.add('ev-lobby-empty');
-            }
+            latency.textContent = `${ms}ms`;
+            if (ms >= 200) latency.classList.add('full');
+            else if (ms >= 100) latency.classList.add('mid');
+            else latency.classList.add('low');
         }
 
         main.appendChild(name);
-        main.appendChild(players);
+        main.appendChild(latency);
         row.appendChild(main);
 
         row.addEventListener('click', () => {
@@ -1822,7 +1792,6 @@ window.addEventListener('load', () => {
             lobbiesLoaded = true;
             console.log('[ev-lobbies] Loaded lobbies:', LOBBIES);
             renderLobbyList();
-            refreshPlayerCounts();
         } catch (err) {
             console.error('[ev-lobbies] Error loading lobbies from matchmaker:', err);
             setStatus('Error loading lobby list.');
@@ -1830,48 +1799,6 @@ window.addEventListener('load', () => {
             lobbiesLoading = false;
         }
     }
-
-    // ----------------- player counts -----------------
-async function refreshPlayerCounts() {
-    if (!Array.isArray(LOBBIES) || !LOBBIES.length) return;
-
-    setStatus('Updating player counts ...');
-
-    // Deliberately NOT resetting every count to null before fetching (that used to blank the
-    // whole list every refresh, then repopulate it) — the last known count stays on screen until
-    // its own fetch actually resolves with a new one, so a poll cycle updates numbers in place
-    // instead of flashing the list empty first. A lobby only ever shows the "..." loading state
-    // the very first time, before it's ever had a successful response.
-    const tasks = LOBBIES.map(lobby => (async () => {
-        try {
-            const httpBase = lobby.connectionUrl
-                .replace(/^wss:/, 'https:')
-                .replace(/^ws:/, 'http:');
-            const url = httpBase + 'players?' + Math.random();
-            // Fetched via the background worker, not here — a content-script fetch runs in the
-            // PAGE's origin (https://ev.io) and gets CORS-blocked by the rivet.game lobby server,
-            // which doesn't send it an Access-Control-Allow-Origin header. See background.js.
-            const resp = await chrome.runtime.sendMessage({ type: 'fetchPlayerCount', url });
-            if (!resp || !resp.ok) return;
-
-            const data = resp.data;
-            const count = typeof data.playerCount === 'number'
-                ? data.playerCount
-                : (Array.isArray(data.players) ? data.players.length : null);
-
-            if (!PLAYER_INFO[lobby.id]) PLAYER_INFO[lobby.id] = {};
-            PLAYER_INFO[lobby.id].count = count;
-            PLAYER_INFO[lobby.id].updatedAt = Date.now();
-        } catch (e) {
-        }
-    })());
-
-    await Promise.allSettled(tasks);
-
-    renderLobbyList();
-    setStatus('');
-}
-
 
     // ----------------- top-bar button -----------------
 
@@ -1969,7 +1896,6 @@ async function refreshPlayerCounts() {
             loadLobbiesFromBundle();
         } else {
             renderLobbyList();
-            refreshPlayerCounts();
         }
     }
 
