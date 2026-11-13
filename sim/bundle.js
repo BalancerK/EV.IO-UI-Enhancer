@@ -23617,6 +23617,7 @@ var EvioSim = (() => {
   function _clearAllPickupWeapons(p2) {
     if (!p2) return;
     const carried = p2.pickupAmmo ? Object.keys(p2.pickupAmmo).map(Number) : [];
+    p2.weaponTiers = {};
     if (carried.length === 0) {
       p2.pickupAmmo = {};
       return;
@@ -23626,13 +23627,22 @@ var EvioSim = (() => {
     p2.pickupAmmo = {};
     if (wasEquipped) _revertToPrimaryWeapon(p2);
   }
-  function _grantPickupWeapon(p2, nid, isBot) {
+  function _grantPickupWeapon(p2, nid, isBot, tier, session) {
     if (!p2 || !Number.isFinite(nid)) return;
     if (!p2.pickupAmmo) p2.pickupAmmo = {};
     const size = WEAPON_PICKUP_SIZE[nid];
-    const grant = Number.isFinite(size) && size > 0 ? size : 1;
+    const grant = (Number.isFinite(size) && size > 0 ? size : 1) * (GAME_MODE === "survival" ? SURVIVAL_OFFICIAL.pickupAmmoMultiplier : 1);
     const alreadyCarried = Object.prototype.hasOwnProperty.call(p2.pickupAmmo, nid);
     p2.pickupAmmo[nid] = (alreadyCarried ? p2.pickupAmmo[nid] : 0) + grant;
+    if (GAME_MODE === "survival") {
+      if (!p2.weaponTiers) p2.weaponTiers = {};
+      const prev = alreadyCarried ? p2.weaponTiers[nid] || 1 : 0;
+      const next = Math.min(SURVIVAL_OFFICIAL.maxWeaponTier, prev + Math.max(1, tier | 0));
+      p2.weaponTiers[nid] = next;
+      if (session && session.ws && prev > 0 && next > prev) {
+        safeSend(session.ws, "~4`" + JSON.stringify({ type: "11", data: { wpnId: nid, tier: next } }));
+      }
+    }
     if (!alreadyCarried) {
       if (!Array.isArray(p2.weaponList)) p2.weaponList = [];
       let insertAt = p2.weaponList.length;
@@ -23681,7 +23691,7 @@ var EvioSim = (() => {
             p2.armorPoints = Math.min(1, p2.armorPoints + SURVIVAL_ARMOR_KIT_AMOUNT);
           }
         } else {
-          _grantPickupWeapon(p2, st2.weaponTypeId, !!s2.isBot);
+          _grantPickupWeapon(p2, st2.weaponTypeId, !!s2.isBot, st2.tier, s2);
         }
         st2.weaponTypeId = _randomPickupWeapon();
         st2.tier = _rollPickupTier();
@@ -24333,11 +24343,18 @@ var EvioSim = (() => {
   };
   function applyExplosionDamage(blastPos, rawDmg, aoe, ownerSid, weaponType, sessions) {
     if (!(rawDmg > 0) || !(aoe > 0)) return 0;
+    const _owner = sessions && typeof sessions.get === "function" ? sessions.get(ownerSid) : null;
+    const _tier = _owner && _owner.playerState ? survivalWeaponTier(_owner.playerState, weaponType) : 1;
+    if (_tier > 1) {
+      rawDmg *= Math.pow(SURVIVAL_OFFICIAL.tierDmg, _tier - 1);
+      aoe *= Math.pow(SURVIVAL_OFFICIAL.tierAoe, _tier - 1);
+    }
     let hits = 0;
     for (const s2 of sessions.values()) {
       if (!s2.accepted) continue;
       const v2 = s2.playerState;
       if (!v2 || !v2.position || v2.deathStateTimer > 0 || v2.healthPoints <= 0) continue;
+      if (weaponType === 176 && v2._survIsBoss && !SURVIVAL_OFFICIAL.tripMinesKillBosses) continue;
       const qx = Math.max(v2.position.x - 0.5, Math.min(blastPos.x, v2.position.x + 0.5));
       const qy = Math.max(v2.position.y, Math.min(blastPos.y, v2.position.y + 2));
       const qz = Math.max(v2.position.z - 0.5, Math.min(blastPos.z, v2.position.z + 0.5));
@@ -25519,8 +25536,12 @@ var EvioSim = (() => {
     if (GAME_MODE === "survival" && attacker && attacker !== victim && opts && !opts.attackerIsBot && !opts.victimIsBot) {
       return;
     }
+    if (attacker && attacker !== victim && Number.isFinite(attacker._survDmgMult)) {
+      amount *= attacker._survDmgMult;
+      if (Number.isFinite(attacker._survDmgCap)) amount = Math.min(amount, attacker._survDmgCap);
+    }
     let o2 = amount * DAMAGE_SCALE;
-    if (opts && opts.victimIsBoss) o2 *= SURVIVAL_BOSS_DAMAGE_RESIST;
+    if (Number.isFinite(victim._survHpMult) && victim._survHpMult > 0) o2 /= victim._survHpMult;
     if (o2 > victim.armorPoints) {
       o2 -= victim.armorPoints;
       victim.armorPoints = 0;
@@ -25806,8 +25827,8 @@ var EvioSim = (() => {
     if (!(baseDmg > 0)) return;
     const critMult = hit.headshot ? WEAPON_HEADSHOT_MULT[shooter.equippedWeaponId] || HEADSHOT_MULT : 1;
     const shooterSession = sessions.get(shooter._ownerSid);
-    const botMult = shooterSession && shooterSession.isBot ? BOT_DAMAGE_MULT : 1;
-    const damage = baseDmg * DMG_GLOBAL_MULT * critMult * LOBBY_DAMAGE_MULT * botMult;
+    const botMult = shooterSession && shooterSession.isBot && !Number.isFinite(shooter._survDmgMult) ? BOT_DAMAGE_MULT : 1;
+    const damage = baseDmg * DMG_GLOBAL_MULT * critMult * LOBBY_DAMAGE_MULT * botMult * survivalTierDmgMult(shooter, shooter.equippedWeaponId);
     const victimSession = sessions.get(victim._ownerSid);
     const wdef = (WEAPON_DB && (WEAPON_DB.dataById || WEAPON_DB))[shooter.equippedWeaponId] || {};
     let topKills = 0, alive = 0;
@@ -26632,6 +26653,8 @@ var EvioSim = (() => {
       p2.deathStateTimer += 1;
       if (GAME_MODE === "survival" && !s2.isBot) {
         if (p2.deathStateTimer > SURVIVAL_BLEEDOUT_TICKS) s2.survivalOut = true;
+      } else if (GAME_MODE === "survival" && s2.isSurvivalBot) {
+        survivalBotDeathTick(s2, p2);
       } else if (p2.deathStateTimer > RESPAWN_TICKS) {
         respawnPlayerNow(p2);
       }
@@ -26708,6 +26731,7 @@ var EvioSim = (() => {
         console.log(`[evio-local] survival: ${s2.displayName} revived ${target.displayName}`);
       }
       p2.healthPoints = Math.min(1, p2.healthPoints + SURVIVAL_REVIVER_HEAL_REWARD);
+      p2.revives = (p2.revives || 0) + 1;
       p2.reviveTargetId = -1;
       p2.reviveHoldTicks = 0;
     }
@@ -27766,7 +27790,7 @@ var EvioSim = (() => {
         const magazine = isEquipped ? Math.max(0, playerState.gunAmmo | 0) : cachedMag != null ? Math.max(0, cachedMag | 0) : weaponClip(nid, playerState);
         const pool = playerState.pickupAmmo && Object.prototype.hasOwnProperty.call(playerState.pickupAmmo, nid) ? playerState.pickupAmmo[nid] : null;
         const reserve = pool != null ? Math.max(0, pool - magazine) : 999999;
-        body.push(135, nid, 132, reserve, 133, magazine, 134, 0);
+        body.push(135, nid, 132, reserve, 133, magazine, 134, playerState.weaponTiers && playerState.weaponTiers[nid] || 0);
       }
     }
     if (!held) body.push(135, 262, 132, 999999, 133, 999999, 134, 0);
@@ -28021,6 +28045,14 @@ var EvioSim = (() => {
         playerState.deaths | 0,
         216,
         playerState.score | 0,
+        // 219/223/224 playerScore.bot_kills / boss_kills / revives — survival's scoreboard columns
+        // (showBossKills/showRevives). Ascending order matters: the decoder is one forward scan.
+        219,
+        playerState.botKills | 0,
+        223,
+        playerState.bossKills | 0,
+        224,
+        playerState.revives | 0,
         226,
         playerState.assists | 0
       );
@@ -28531,6 +28563,9 @@ var EvioSim = (() => {
       p2.deaths = 0;
       p2.score = 0;
       p2.assists = 0;
+      p2.botKills = 0;
+      p2.bossKills = 0;
+      p2.revives = 0;
       p2.killStreak = 0;
       p2.multiKill = 0;
       p2.healthPoints = 1;
@@ -28747,6 +28782,10 @@ var EvioSim = (() => {
     let u2 = MEDAL_SCORE[medalKey] || 0;
     if (victim && victim.isBot && SCORE_MULT_BOT !== 1) u2 = Math.round(u2 * SCORE_MULT_BOT);
     if (victimUid === GUEST_UID && SCORE_MULT_GUEST !== 1) u2 = Math.round(u2 * SCORE_MULT_GUEST);
+    if (GAME_MODE === "survival" && victim) {
+      if (victim._survIsBoss) u2 = Math.round(u2 * SURVIVAL_OFFICIAL.bossScoreMultiplier);
+      u2 = Math.round(u2 * survivalWaveScoreMultiplier());
+    }
     return u2;
   }
   var ASSIST_WINDOW = define({
@@ -28793,6 +28832,8 @@ var EvioSim = (() => {
       return;
     }
     attacker.kills = (attacker.kills || 0) + 1;
+    if (victim && victim.isBot) attacker.botKills = (attacker.botKills || 0) + 1;
+    if (victim && victim._survIsBoss) attacker.bossKills = (attacker.bossKills || 0) + 1;
     const killPts = medalScore("kill", victim, o2.victimUid);
     let gained = killPts;
     awardMedal(attacker, "kill", killPts);
@@ -28944,7 +28985,7 @@ var EvioSim = (() => {
     key: "survivalBaseBotCount",
     env: "EVIO_SURVIVAL_BASE_BOT_COUNT",
     type: "int",
-    def: 2,
+    def: 8,
     min: 0,
     max: 24,
     category: "Survival",
@@ -28956,7 +28997,7 @@ var EvioSim = (() => {
     key: "survivalBotCountPerWave",
     env: "EVIO_SURVIVAL_BOT_COUNT_PER_WAVE",
     type: "number",
-    def: 1.5,
+    def: 0.2,
     min: 0,
     max: 20,
     step: 0.1,
@@ -28970,7 +29011,7 @@ var EvioSim = (() => {
     key: "survivalMaxBotCount",
     env: "EVIO_SURVIVAL_MAX_BOT_COUNT",
     type: "int",
-    def: 300,
+    def: 20,
     min: 1,
     max: 2e3,
     category: "Survival",
@@ -28979,24 +29020,11 @@ var EvioSim = (() => {
   }, (v2) => {
     SURVIVAL_MAX_BOT_COUNT = v2;
   });
-  var SURVIVAL_LEVEL_UP_EVERY_N_WAVES = define({
-    key: "survivalLevelUpEveryNWaves",
-    env: "EVIO_SURVIVAL_LEVEL_UP_EVERY_N_WAVES",
-    type: "int",
-    def: 3,
-    min: 1,
-    max: 100,
-    category: "Survival",
-    label: "Bot level +1 every N waves",
-    desc: "Bot difficulty (1-10, same scale as botLevel) climbs by one every N waves, capped at 10."
-  }, (v2) => {
-    SURVIVAL_LEVEL_UP_EVERY_N_WAVES = v2;
-  });
   var SURVIVAL_BOSS_EVERY_N_WAVES = define({
     key: "survivalBossEveryNWaves",
     env: "EVIO_SURVIVAL_BOSS_EVERY_N_WAVES",
     type: "int",
-    def: 5,
+    def: 10,
     min: 1,
     max: 100,
     category: "Survival",
@@ -29022,27 +29050,13 @@ var EvioSim = (() => {
     key: "survivalMaxSimultaneousBosses",
     env: "EVIO_SURVIVAL_MAX_SIMULTANEOUS_BOSSES",
     type: "int",
-    def: 4,
+    def: 1,
     min: 1,
     max: 20,
     category: "Survival",
     label: "Max simultaneous bosses"
   }, (v2) => {
     SURVIVAL_MAX_SIMULTANEOUS_BOSSES = v2;
-  });
-  var SURVIVAL_BOSS_DAMAGE_RESIST = define({
-    key: "survivalBossDamageResist",
-    env: "EVIO_SURVIVAL_BOSS_DAMAGE_RESIST",
-    type: "number",
-    def: 0.2,
-    min: 0.01,
-    max: 1,
-    step: 0.01,
-    category: "Survival",
-    label: "Boss damage resistance",
-    desc: "Multiplies incoming damage to a boss bot (0.2 = takes 20% damage, i.e. ~5x the effective HP of a normal bot). Not an inflated health pool \u2014 healthPoints is normalized 0..1 and every other system (health bar %, regen, armor) relies on that staying true, so the boss is tankier by taking less damage per hit instead, which keeps its health bar meaningful."
-  }, (v2) => {
-    SURVIVAL_BOSS_DAMAGE_RESIST = v2;
   });
   var SURVIVAL_BOSS_REWARD = define({
     key: "survivalBossReward",
@@ -29116,7 +29130,7 @@ var EvioSim = (() => {
     key: "survivalMeleeBotRatio",
     env: "EVIO_SURVIVAL_MELEE_BOT_RATIO",
     type: "number",
-    def: 0.7,
+    def: 0.8333,
     min: 0,
     max: 1,
     step: 0.05,
@@ -29199,16 +29213,16 @@ var EvioSim = (() => {
     // Rocket Launcher
     { name: "Grenade Wave", weight: 1, minWave: 5, weaponId: 283 },
     // Grenade Launcher
-    { name: "Teleporters", weight: 3, minWave: 5, weaponId: null },
-    // no forced weapon — environmental
-    { name: "Smoke Wave", weight: 1, minWave: 5, weaponId: null }
-    // no forced weapon — environmental
+    // No forced weapon for these two — officially they raise a bot ABILITY level for the wave
+    // instead (abilityLevels: {AB_ID_TP: 3} / {AB_ID_SMOKE: 1}); the Smoke Wave is also noZombies.
+    { name: "Teleporters", weight: 3, minWave: 5, weaponId: null, abilityLevels: { 0: 3 } },
+    { name: "Smoke Wave", weight: 1, minWave: 5, weaponId: null, abilityLevels: { 9: 1 }, noZombies: true }
   ];
   var SURVIVAL_SPECIAL_WAVE_CHANCE = define({
     key: "survivalSpecialWaveChance",
     env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE",
     type: "number",
-    def: 0.3,
+    def: 0.2,
     min: 0,
     max: 1,
     step: 0.05,
@@ -29222,7 +29236,7 @@ var EvioSim = (() => {
     key: "survivalSpecialWaveChanceRampPerWave",
     env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE_RAMP",
     type: "number",
-    def: 0.01,
+    def: 0,
     min: 0,
     max: 0.1,
     step: 5e-3,
@@ -29275,7 +29289,7 @@ var EvioSim = (() => {
     key: "survivalItemChance",
     env: "EVIO_SURVIVAL_ITEM_CHANCE",
     type: "number",
-    def: 0.25,
+    def: 0.5,
     min: 0,
     max: 1,
     step: 0.05,
@@ -29316,11 +29330,11 @@ var EvioSim = (() => {
   function _rollPickupItem() {
     if (GAME_MODE !== "survival") return SURVIVAL_ITEM_INDEX.NONE;
     if (Math.random() >= SURVIVAL_ITEM_CHANCE) return SURVIVAL_ITEM_INDEX.NONE;
-    return Math.random() < 0.5 ? SURVIVAL_ITEM_INDEX.HEALTH : SURVIVAL_ITEM_INDEX.ARMOR;
+    return Math.random() < 0.6 ? SURVIVAL_ITEM_INDEX.HEALTH : SURVIVAL_ITEM_INDEX.ARMOR;
   }
-  var survivalState = { currentWave: -1, bossPlayerIds: [], activeSpecialWave: null };
+  var survivalState = { currentWave: -1, bossPlayerIds: [], activeSpecialWave: null, waveIsZombie: true };
   function resetSurvivalState() {
-    survivalState = { currentWave: -1, bossPlayerIds: [], activeSpecialWave: null };
+    survivalState = { currentWave: -1, bossPlayerIds: [], activeSpecialWave: null, waveIsZombie: true };
   }
   function _forceSurvivalBotWeapon(bot, weaponId) {
     const p2 = bot.playerState;
@@ -29336,69 +29350,216 @@ var EvioSim = (() => {
     startWeaponSwitch(p2);
     bot.weaponId = weaponId;
   }
+  var SURVIVAL_OFFICIAL = {
+    botBaseLvl: 2,
+    botLvlWaveBonus: 0.08,
+    botMaxLvl: 6,
+    // Gun ("human") bots: no per-wave growth at all officially.
+    botBaseSpeedPerc: 0.7,
+    botSpeedWaveBonusPerc: 0,
+    botSpeedMax: 1.1,
+    botBaseHPPerc: 1,
+    botHPWaveBonusPerc: 0,
+    botHPMax: 2,
+    botDmgMultiplierBase: 0.3,
+    botDmgWaveMultiplierBonus: 0,
+    botDmgMax: 0.15,
+    // Zombies start slow and weak and close the gap fast.
+    botZombieBaseSpeedPerc: 0.5,
+    botZombieSpeedWaveBonusPerc: 0.1,
+    botZombieSpeedMax: 1.1,
+    botZombieHPWaveBonusPerc: 0.01,
+    botZombieHPMax: 2,
+    botZombieDmgMultiplierBase: 0.5,
+    botZombieDmgWaveMultiplierBonus: 0.01,
+    botZombieDmgMax: 0.45,
+    // Boss.
+    botBossBaseHealth: 10,
+    botBossHealthWaveMultiplierBonus: 0.2,
+    bossLevelPerWave: 0.2,
+    botBossDmgWaveMultiplierBonus: 0.02,
+    botZombieBossDmgWaveMultiplierBonus: 5e-3,
+    bossSpeedPerWaveBonus: 0.015,
+    bossZombieSpeedPerWaveBonus: 5e-3,
+    bossMaxMoveSpeed: 1.5,
+    tripMinesKillBosses: false,
+    // Player side — these the client runs too (getDmg/getAoe), so they are exact.
+    maxWeaponTier: 4,
+    tierDmg: 1.15,
+    tierAoe: 1.1,
+    pickupAmmoMultiplier: 2,
+    // Scoring (Score.getWaveMultiplier, GameConstants.BOSS_SCORE_MULTIPLIER).
+    wavesTillRewardDoubles: 10,
+    bossScoreMultiplier: 20
+  };
+  var SURVIVAL_BOT_RESPAWN_TICKS = define({
+    key: "survivalBotRespawnTicks",
+    env: "EVIO_SURVIVAL_BOT_RESPAWN_TICKS",
+    type: "int",
+    def: 400,
+    min: 20,
+    max: 6e3,
+    category: "Survival",
+    label: "Bot respawn delay (ticks)",
+    desc: "How long a killed survival bot stays down before rejoining the horde. 400 = 20s at 20Hz, the official botRespawnSec. A boss never respawns \u2014 it is removed when it dies."
+  }, (v2) => {
+    SURVIVAL_BOT_RESPAWN_TICKS = v2;
+  });
+  function survivalBotLevelForWave(wave) {
+    const o2 = SURVIVAL_OFFICIAL;
+    return Math.max(1, Math.round(Math.min(o2.botMaxLvl, o2.botBaseLvl + o2.botLvlWaveBonus * Math.max(0, wave))));
+  }
+  function survivalBotStatsForWave(wave, kind) {
+    const o2 = SURVIVAL_OFFICIAL, w2 = Math.max(0, wave), z2 = !!(kind && kind.zombie);
+    if (kind && kind.boss) {
+      const baseSpeed = z2 ? o2.botZombieBaseSpeedPerc : o2.botBaseSpeedPerc;
+      const baseDmg = z2 ? o2.botZombieDmgMultiplierBase : o2.botDmgMultiplierBase;
+      return {
+        speed: Math.min(o2.bossMaxMoveSpeed, baseSpeed + (z2 ? o2.bossZombieSpeedPerWaveBonus : o2.bossSpeedPerWaveBonus) * w2),
+        hpMult: o2.botBossBaseHealth * (1 + o2.botBossHealthWaveMultiplierBonus * w2),
+        dmgMult: baseDmg + (z2 ? o2.botZombieBossDmgWaveMultiplierBonus : o2.botBossDmgWaveMultiplierBonus) * w2,
+        dmgCap: null
+      };
+    }
+    return z2 ? {
+      speed: Math.min(o2.botZombieSpeedMax, o2.botZombieBaseSpeedPerc + o2.botZombieSpeedWaveBonusPerc * w2),
+      hpMult: Math.min(o2.botZombieHPMax, o2.botBaseHPPerc + o2.botZombieHPWaveBonusPerc * w2),
+      dmgMult: o2.botZombieDmgMultiplierBase + o2.botZombieDmgWaveMultiplierBonus * w2,
+      dmgCap: o2.botZombieDmgMax
+    } : {
+      speed: Math.min(o2.botSpeedMax, o2.botBaseSpeedPerc + o2.botSpeedWaveBonusPerc * w2),
+      hpMult: Math.min(o2.botHPMax, o2.botBaseHPPerc + o2.botHPWaveBonusPerc * w2),
+      dmgMult: o2.botDmgMultiplierBase + o2.botDmgWaveMultiplierBonus * w2,
+      dmgCap: o2.botDmgMax
+    };
+  }
+  function applySurvivalBotStats(bot, wave) {
+    const p2 = bot && bot.playerState;
+    if (!p2) return;
+    const st2 = survivalBotStatsForWave(wave, { zombie: !!bot.isZombie, boss: !!bot.isBoss });
+    p2._survDmgMult = st2.dmgMult;
+    p2._survDmgCap = st2.dmgCap;
+    p2._survHpMult = st2.hpMult;
+    p2._survIsBoss = !!bot.isBoss;
+    const stats = p2._ps && p2._ps.Qz8l93a;
+    if (stats && Number.isFinite(stats.Q6o3kdb)) {
+      if (!bot._survBaseSpeed) bot._survBaseSpeed = { walk: stats.Q6o3kdb, sprint: stats.Q8i9f3s };
+      stats.Q6o3kdb = bot._survBaseSpeed.walk * st2.speed;
+      if (Number.isFinite(bot._survBaseSpeed.sprint)) stats.Q8i9f3s = bot._survBaseSpeed.sprint * st2.speed;
+    }
+  }
+  function applySurvivalWaveLoadout(bot, wave) {
+    const special = survivalState.activeSpecialWave;
+    const defaultWeapon = bot.isSwordBot ? ZOMBIE_MELEE_WEAPON_ID : 4;
+    _forceSurvivalBotWeapon(bot, !bot.isZombie && special && special.weaponId || defaultWeapon);
+    if (_live.setBotAbilityLevels) _live.setBotAbilityLevels(bot, special ? special.abilityLevels : null);
+    applySurvivalBotStats(bot, wave);
+    bot._survLoadoutPending = bot.playerState && bot.playerState._ps ? null : wave;
+  }
+  function spawnSurvivalBot(wave) {
+    const zombie = !!survivalState.waveIsZombie;
+    const bot = _live.spawnBot({
+      level: survivalBotLevelForWave(wave),
+      isSurvivalBot: true,
+      name: "Bot",
+      meleeBot: zombie,
+      ...zombie ? { skinUrl: SURVIVAL_MELEE_BOT_SKIN.skinUrl, thumbUrl: SURVIVAL_MELEE_BOT_SKIN.thumbUrl } : {}
+    });
+    applySurvivalWaveLoadout(bot, wave);
+    return bot;
+  }
+  function survivalBotDeathTick(s2, p2) {
+    if (s2._survivalPendingRemoveAtTick) return;
+    const tick = _live.globalTick || 0;
+    if (s2.isBoss) {
+      s2._survivalPendingRemoveAtTick = tick + SURVIVAL_BOT_REMOVAL_GRACE_TICKS;
+      return;
+    }
+    if (p2.deathStateTimer <= SURVIVAL_BOT_RESPAWN_TICKS) return;
+    const wave = Math.max(1, survivalState.currentWave);
+    if (!!s2.isZombie !== !!survivalState.waveIsZombie && _live.spawnBot && _live.removeBot) {
+      _live.removeBot(s2.playerId);
+      spawnSurvivalBot(wave);
+      return;
+    }
+    respawnPlayerNow(p2);
+    s2.botLevel = survivalBotLevelForWave(wave);
+    applySurvivalWaveLoadout(s2, wave);
+  }
+  function survivalWeaponTier(p2, nid) {
+    if (GAME_MODE !== "survival" || !p2 || !p2.weaponTiers) return 1;
+    return Math.max(1, p2.weaponTiers[nid] | 0);
+  }
+  function survivalTierDmgMult(p2, nid) {
+    return Math.pow(SURVIVAL_OFFICIAL.tierDmg, survivalWeaponTier(p2, nid) - 1);
+  }
+  function survivalWaveScoreMultiplier() {
+    return 1 + Math.min(Math.max(0, survivalState.currentWave) / SURVIVAL_OFFICIAL.wavesTillRewardDoubles, 2);
+  }
   function survivalWaveNumber(tick) {
     return Math.floor((tick - match.roundStartTick - SURVIVAL_START_DELAY_TICKS) / SURVIVAL_WAVE_TICKS);
   }
   function tickSurvivalWaves(sessions) {
     if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
     if (!_live.spawnBot) return;
+    for (const b2 of _live.listBots()) {
+      if (b2._survLoadoutPending != null && b2.playerState && b2.playerState._ps) {
+        applySurvivalWaveLoadout(b2, b2._survLoadoutPending);
+      }
+    }
     const wave = survivalWaveNumber(_live.globalTick);
     if (wave <= survivalState.currentWave) return;
     survivalState.currentWave = wave;
     const survivalBots = () => _live.listBots().filter((b2) => b2.isSurvivalBot && !b2.isBoss && !b2._survivalPendingRemoveAtTick);
     const targetCount = wave < 1 ? 0 : Math.min(
       SURVIVAL_MAX_BOT_COUNT,
-      Math.floor(SURVIVAL_BASE_BOT_COUNT + (wave - 1) * SURVIVAL_BOT_COUNT_PER_WAVE)
+      Math.floor(SURVIVAL_BASE_BOT_COUNT + (wave - 1) * SURVIVAL_BOT_COUNT_PER_WAVE + 1e-9)
     );
-    const targetLevel = Math.min(10, 5 + Math.floor(Math.max(0, wave - 1) / SURVIVAL_LEVEL_UP_EVERY_N_WAVES));
-    while (survivalBots().length < targetCount) {
-      const meleeBot = Math.random() < SURVIVAL_MELEE_BOT_RATIO;
-      _live.spawnBot({
-        level: targetLevel,
-        isSurvivalBot: true,
-        name: "Bot",
-        meleeBot,
-        ...meleeBot ? { skinUrl: SURVIVAL_MELEE_BOT_SKIN.skinUrl, thumbUrl: SURVIVAL_MELEE_BOT_SKIN.thumbUrl } : {}
-      });
-    }
+    const targetLevel = survivalBotLevelForWave(wave);
+    survivalState.activeSpecialWave = wave >= 1 && Math.random() < _survivalSpecialWaveChanceForWave(wave, 5) ? pickSpecialWaveType() : null;
+    const special = survivalState.activeSpecialWave;
+    survivalState.waveIsZombie = !(special && (special.noZombies || special.weaponId)) && Math.random() < SURVIVAL_MELEE_BOT_RATIO;
+    while (survivalBots().length < targetCount) spawnSurvivalBot(wave);
     const excess = survivalBots().length - targetCount;
     if (excess > 0) {
       for (const b2 of survivalBots().slice(targetCount)) _live.removeBot(b2.playerId);
     }
-    for (const b2 of survivalBots()) b2.botLevel = targetLevel;
-    survivalState.activeSpecialWave = wave >= 1 && Math.random() < _survivalSpecialWaveChanceForWave(wave, 5) ? pickSpecialWaveType() : null;
     for (const b2 of survivalBots()) {
-      const defaultWeapon = b2.isSwordBot ? ZOMBIE_MELEE_WEAPON_ID : 4;
-      const forcedWeaponId = survivalState.activeSpecialWave && survivalState.activeSpecialWave.weaponId || defaultWeapon;
-      _forceSurvivalBotWeapon(b2, forcedWeaponId);
+      b2.botLevel = targetLevel;
+      applySurvivalWaveLoadout(b2, wave);
     }
-    if (survivalState.activeSpecialWave) {
-      console.log(`[evio-local] survival: wave ${wave} special wave \u2014 ${survivalState.activeSpecialWave.name}`);
-    }
+    if (special) console.log(`[evio-local] survival: wave ${wave} special wave \u2014 ${special.name}`);
     if (wave >= 1 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
       if (!Array.isArray(survivalState.bossPlayerIds)) survivalState.bossPlayerIds = [];
-      survivalState.bossPlayerIds = survivalState.bossPlayerIds.filter((id2) => sessions.get(id2));
+      survivalState.bossPlayerIds = survivalState.bossPlayerIds.filter((id2) => {
+        const b2 = sessions.get(id2);
+        return b2 && !b2._survivalPendingRemoveAtTick;
+      });
       const desiredBossCount = Math.min(
         SURVIVAL_MAX_SIMULTANEOUS_BOSSES,
         1 + Math.floor(wave / SURVIVAL_MULTI_BOSS_EVERY_N_WAVES)
       );
+      const zombieBoss = !!survivalState.waveIsZombie;
+      const bossLevel = Math.min(10, Math.round(targetLevel + SURVIVAL_OFFICIAL.bossLevelPerWave * wave));
       while (survivalState.bossPlayerIds.length < desiredBossCount) {
         const bossName = SURVIVAL_BOSS_NAMES[Math.floor(Math.random() * SURVIVAL_BOSS_NAMES.length)];
-        const bossSkin = SURVIVAL_BOSS_SKINS[Math.floor(Math.random() * SURVIVAL_BOSS_SKINS.length)];
+        const bossSkin = zombieBoss ? SURVIVAL_MELEE_BOT_SKIN : SURVIVAL_BOSS_SKINS[Math.floor(Math.random() * SURVIVAL_BOSS_SKINS.length)];
         const boss = _live.spawnBot({
-          level: 10,
+          level: bossLevel,
           isSurvivalBot: true,
           isBoss: true,
           name: bossName,
+          meleeBot: zombieBoss,
           skinUrl: bossSkin.skinUrl,
           thumbUrl: bossSkin.thumbUrl,
           modelScale: SURVIVAL_BOSS_SCALE
         });
+        applySurvivalWaveLoadout(boss, wave);
         survivalState.bossPlayerIds.push(boss.playerId);
-        console.log(`[evio-local] survival: wave ${wave} boss spawned (${boss.playerId}, ${survivalState.bossPlayerIds.length}/${desiredBossCount} active)`);
+        console.log(`[evio-local] survival: wave ${wave} boss spawned (${boss.playerId}, ${survivalState.bossPlayerIds.length}/${desiredBossCount} active, health x${boss.playerState._survHpMult.toFixed(0)})`);
       }
     }
-    console.log(`[evio-local] survival: wave ${wave} \u2014 bots=${targetCount} level=${targetLevel}`);
+    console.log(`[evio-local] survival: wave ${wave} \u2014 ${survivalState.waveIsZombie ? "zombies" : "gunmen"} bots=${targetCount} level=${targetLevel}`);
   }
   var METRICS_HZ = 1;
   var METRICS_KEEP = 300;
@@ -29777,6 +29938,7 @@ var EvioSim = (() => {
     const sessions = /* @__PURE__ */ new Map();
     _live.sessions = sessions;
     _live.spawnBot = null;
+    _live.setBotAbilityLevels = null;
     _live.removeBot = null;
     _live.listBots = null;
     const heartbeat = setInterval(() => {
@@ -30428,6 +30590,25 @@ var EvioSim = (() => {
     function listBots() {
       return [...sessions.values()].filter((s2) => s2 && s2.isBot);
     }
+    _live.setBotAbilityLevels = (bot, levels) => {
+      const p2 = bot && bot.playerState, ps2 = p2 && p2._ps;
+      if (!ps2 || !ps2.Qz8l93a) return;
+      if (!bot._baseAbilitySeed) bot._baseAbilitySeed = (ps2.weaponStateArray || []).slice();
+      const seed = bot._baseAbilitySeed.slice();
+      if (levels) for (const k2 of Object.keys(levels)) seed[+k2] = Math.max(seed[+k2] || 0, levels[k2]);
+      const key = seed.join(",");
+      if (bot._abilitySeedKey === void 0 && !levels) {
+        bot._abilitySeedKey = key;
+        return;
+      }
+      if (bot._abilitySeedKey === key) return;
+      bot._abilitySeedKey = key;
+      const clean = _sanitizeAbilitySeed(seed);
+      Object.assign(ps2.Qz8l93a, computeWeaponStats(clean));
+      refreshMagazineCapacity(p2);
+      ps2.weaponStateArray = clean;
+      bot._survBaseSpeed = null;
+    };
     _live.spawnBot = spawnBot;
     _live.removeBot = removeBot;
     _live.listBots = listBots;
@@ -31287,6 +31468,12 @@ var EvioSim = (() => {
     // reasoning as getSessions()/getParityRings() above for other reassignable module state).
     tickSurvivalWaves,
     survivalWaveNumber,
+    SURVIVAL_OFFICIAL,
+    survivalBotLevelForWave,
+    survivalBotStatsForWave,
+    survivalWeaponTier,
+    getLiveHooks: () => _live,
+    medalScore,
     tickSurvivalRevives,
     tickSurvivalBotRemoval,
     pickWeightedTier,

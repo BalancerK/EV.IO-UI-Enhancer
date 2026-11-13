@@ -1771,6 +1771,7 @@ function _clearPickupSlot(p, nid) {
 function _clearAllPickupWeapons(p) {
   if (!p) return;
   const carried = p.pickupAmmo ? Object.keys(p.pickupAmmo).map(Number) : [];
+  p.weaponTiers = {};
   if (carried.length === 0) { p.pickupAmmo = {}; return; }
   const wasEquipped = carried.includes(p.equippedWeaponId);
   p.weaponList = (Array.isArray(p.weaponList) ? p.weaponList : []).filter((w) => !carried.includes(w));
@@ -1800,13 +1801,27 @@ function _clearAllPickupWeapons(p) {
 // groups this way too (8 < 262 < 281), with no special-casing needed for it at all — it is simply
 // another member of the same sort, not a fixed anchor point.
 
-function _grantPickupWeapon(p, nid, isBot) {
+function _grantPickupWeapon(p, nid, isBot, tier, session) {
   if (!p || !Number.isFinite(nid)) return;
   if (!p.pickupAmmo) p.pickupAmmo = {};
   const size = WEAPON_PICKUP_SIZE[nid];
-  const grant = Number.isFinite(size) && size > 0 ? size : 1;
+  // Official survival: pickupAmmoMultiplier 2.
+  const grant = (Number.isFinite(size) && size > 0 ? size : 1)
+    * (GAME_MODE === "survival" ? SURVIVAL_OFFICIAL.pickupAmmoMultiplier : 1);
   const alreadyCarried = Object.prototype.hasOwnProperty.call(p.pickupAmmo, nid);
   p.pickupAmmo[nid] = (alreadyCarried ? p.pickupAmmo[nid] : 0) + grant;
+  if (GAME_MODE === "survival") {
+    // weaponTiersAddUp (official default true): grabbing a weapon you already carry ADDS the
+    // pickup's tier to it, up to maxWeaponTier. The '~4' type '11' signal is what makes the HUD
+    // say "<weapon> upgraded to level N".
+    if (!p.weaponTiers) p.weaponTiers = {};
+    const prev = alreadyCarried ? (p.weaponTiers[nid] || 1) : 0;
+    const next = Math.min(SURVIVAL_OFFICIAL.maxWeaponTier, prev + Math.max(1, tier | 0));
+    p.weaponTiers[nid] = next;
+    if (session && session.ws && prev > 0 && next > prev) {
+      safeSend(session.ws, "~4`" + JSON.stringify({ type: "11", data: { wpnId: nid, tier: next } }));
+    }
+  }
   if (!alreadyCarried) {
     if (!Array.isArray(p.weaponList)) p.weaponList = [];
     // Insert in ascending-nid order (see the comment above) — index 0 (the primary) is never
@@ -1880,7 +1895,7 @@ function processWeaponPickups(sessions, tick) {
           p.armorPoints = Math.min(1, p.armorPoints + SURVIVAL_ARMOR_KIT_AMOUNT);
         }
       } else {
-        _grantPickupWeapon(p, st.weaponTypeId, !!s.isBot);
+        _grantPickupWeapon(p, st.weaponTypeId, !!s.isBot, st.tier, s);
       }
       st.weaponTypeId = _randomPickupWeapon();   // pre-roll the NEXT weapon this point will offer
       st.tier = _rollPickupTier();               // and its glow tier — see buildWeaponPickupBlock
@@ -2768,11 +2783,21 @@ const GRENADE_COMBAT = {
 // target positions, exactly as the client's own blast loop reads i.playerList.
 function applyExplosionDamage(blastPos, rawDmg, aoe, ownerSid, weaponType, sessions) {
   if (!(rawDmg > 0) || !(aoe > 0)) return 0;
+  // Survival weapon tier of the launcher that fired this (rockets/grenade launcher): the client's
+  // getDmg/getAoe scale both, so the blast has to as well.
+  const _owner = sessions && typeof sessions.get === "function" ? sessions.get(ownerSid) : null;
+  const _tier = _owner && _owner.playerState ? survivalWeaponTier(_owner.playerState, weaponType) : 1;
+  if (_tier > 1) {
+    rawDmg *= Math.pow(SURVIVAL_OFFICIAL.tierDmg, _tier - 1);
+    aoe *= Math.pow(SURVIVAL_OFFICIAL.tierAoe, _tier - 1);
+  }
   let hits = 0;
   for (const s of sessions.values()) {
     if (!s.accepted) continue;
     const v = s.playerState;
     if (!v || !v.position || v.deathStateTimer > 0 || v.healthPoints <= 0) continue;
+    // Official survivalParams.tripMinesKillBosses is false: a trip mine (176) does nothing to a boss.
+    if (weaponType === 176 && v._survIsBoss && !SURVIVAL_OFFICIAL.tripMinesKillBosses) continue;
     // Box-sphere gate: closest point on the player AABB (±0.5 wide, feet..feet+2 tall) to the blast.
     const qx = Math.max(v.position.x - 0.5, Math.min(blastPos.x, v.position.x + 0.5));
     const qy = Math.max(v.position.y,       Math.min(blastPos.y, v.position.y + 2));
@@ -4034,10 +4059,17 @@ function applyDamage(victim, amount, attacker, opts) {
   // The global damage scale, applied HERE so every damage source goes through it exactly once —
   // bullets, explosions, melee, fall damage. The client applies the same factor to its own predicted
   // health bar via Qsvkg5s.Qbb5ka8 (opcode 27), so the two agree; see the DAMAGE_SCALE note.
+  // Survival bots hit for a fraction of their weapon's damage, with a per-hit ceiling — see
+  // survivalBotStatsForWave. Self-damage (a bot's own fall or grenade) is left alone.
+  if (attacker && attacker !== victim && Number.isFinite(attacker._survDmgMult)) {
+    amount *= attacker._survDmgMult;
+    if (Number.isFinite(attacker._survDmgCap)) amount = Math.min(amount, attacker._survDmgCap);
+  }
   let o = amount * DAMAGE_SCALE;
-  // Survival boss: tankier via damage RESISTANCE, not an inflated HP pool — see
-  // tickSurvivalWaves' own comment on why healthPoints (normalized 0..1) can't just be scaled up.
-  if (opts && opts.victimIsBoss) o *= SURVIVAL_BOSS_DAMAGE_RESIST;
+  // Survival bots and bosses: a bigger health pool is expressed as taking proportionally less,
+  // because healthPoints is normalized 0..1 and cannot simply be scaled up (official boss health
+  // is 10 x (1 + 0.2 per wave) of a normal bar).
+  if (Number.isFinite(victim._survHpMult) && victim._survHpMult > 0) o /= victim._survHpMult;
   if (o > victim.armorPoints) {
     o -= victim.armorPoints; victim.armorPoints = 0;
     if (o > victim.healthPoints) o = victim.healthPoints;
@@ -4440,8 +4472,12 @@ function applyHit(shooter, sessions, hit, eye, shotSid) {
   // playerState, which has no isBot flag of its own; the session does). Real players are completely
   // unaffected: this only ever multiplies by anything other than 1 when the attacker is a bot.
   const shooterSession = sessions.get(shooter._ownerSid);
-  const botMult = (shooterSession && shooterSession.isBot) ? BOT_DAMAGE_MULT : 1;
-  const damage = baseDmg * DMG_GLOBAL_MULT * critMult * LOBBY_DAMAGE_MULT * botMult;
+  // A survival bot carries its own official multiplier (applied in applyDamage); the deathmatch
+  // botDamageMult dial is the non-survival BOT_DAMAGE_MODIFIER and must not stack on top of it.
+  const botMult = (shooterSession && shooterSession.isBot && !Number.isFinite(shooter._survDmgMult))
+    ? BOT_DAMAGE_MULT : 1;
+  const damage = baseDmg * DMG_GLOBAL_MULT * critMult * LOBBY_DAMAGE_MULT * botMult
+    * survivalTierDmgMult(shooter, shooter.equippedWeaponId);
   // Same resolution as botMult above, reused for the botFriendlyFire gate inside applyDamage.
   const victimSession = sessions.get(victim._ownerSid);
   // Medal context for scoring: headshot bonus (+10) and the sword medal (+20). victimUid drives the
@@ -5681,6 +5717,8 @@ function processDeathRespawn(sessions) {
       // finishes reviving them before the bleed-out window below elapses. Bots (including the
       // boss) keep respawning normally either way, same as deathmatch.
       if (p.deathStateTimer > SURVIVAL_BLEEDOUT_TICKS) s.survivalOut = true;
+    } else if (GAME_MODE === "survival" && s.isSurvivalBot) {
+      survivalBotDeathTick(s, p);
     } else if (p.deathStateTimer > RESPAWN_TICKS) {
       respawnPlayerNow(p);
     }
@@ -5772,6 +5810,7 @@ function tickSurvivalRevives(sessions) {
       console.log(`[evio-local] survival: ${s.displayName} revived ${target.displayName}`);
     }
     p.healthPoints = Math.min(1, p.healthPoints + SURVIVAL_REVIVER_HEAL_REWARD);
+    p.revives = (p.revives || 0) + 1;
     p.reviveTargetId = -1;
     p.reviveHoldTicks = 0;
   }
@@ -7573,7 +7612,7 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       const pool = playerState.pickupAmmo && Object.prototype.hasOwnProperty.call(playerState.pickupAmmo, nid)
         ? playerState.pickupAmmo[nid] : null;
       const reserve = pool != null ? Math.max(0, pool - magazine) : 999999;
-      body.push(135, nid, 132, reserve, 133, magazine, 134, 0);
+      body.push(135, nid, 132, reserve, 133, magazine, 134, (playerState.weaponTiers && playerState.weaponTiers[nid]) || 0);
     }
     // NOTE: _prevEmitWeaponIds is deliberately NOT advanced here. This function runs ONCE PER
     // RECIPIENT, so updating it mid-broadcast meant only the first recipient's body carried a
@@ -7800,6 +7839,11 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       214, playerState.kills | 0,
       215, playerState.deaths | 0,
       216, playerState.score | 0,
+      // 219/223/224 playerScore.bot_kills / boss_kills / revives — survival's scoreboard columns
+      // (showBossKills/showRevives). Ascending order matters: the decoder is one forward scan.
+      219, playerState.botKills | 0,
+      223, playerState.bossKills | 0,
+      224, playerState.revives | 0,
       226, playerState.assists | 0,
     );
   }
@@ -8594,7 +8638,7 @@ function respawnAll(sessions) {
   for (const s of sessions.values()) {
     if (!s || !s.accepted || !s.playerState) continue;
     const p = s.playerState;
-    p.kills = 0; p.deaths = 0; p.score = 0; p.assists = 0; p.killStreak = 0; p.multiKill = 0;
+    p.kills = 0; p.deaths = 0; p.score = 0; p.assists = 0; p.botKills = 0; p.bossKills = 0; p.revives = 0; p.killStreak = 0; p.multiKill = 0;
     p.healthPoints = 1; p.armorPoints = 0; p.deathStateTimer = 0; p.fireCooldown = 0;
     // Same reasoning as respawnPlayerNow: pickup weapons never survive a reset, all slots at once.
     // Unlike that path, this loop has no separate primary-restore fixup, so
@@ -8866,6 +8910,11 @@ function medalScore(medalKey, victim, victimUid) {
   let u = MEDAL_SCORE[medalKey] || 0;
   if (victim && victim.isBot && SCORE_MULT_BOT !== 1) u = Math.round(u * SCORE_MULT_BOT);
   if (victimUid === GUEST_UID && SCORE_MULT_GUEST !== 1) u = Math.round(u * SCORE_MULT_GUEST);
+  // Survival (official order): a boss is worth x20, then everything scales with the wave.
+  if (GAME_MODE === "survival" && victim) {
+    if (victim._survIsBoss) u = Math.round(u * SURVIVAL_OFFICIAL.bossScoreMultiplier);
+    u = Math.round(u * survivalWaveScoreMultiplier());
+  }
   return u;
 }
 
@@ -8924,6 +8973,8 @@ function creditKill(attacker, victim, opts) {
     return;
   }
   attacker.kills = (attacker.kills || 0) + 1;
+  if (victim && victim.isBot) attacker.botKills = (attacker.botKills || 0) + 1;      // opcode 219
+  if (victim && victim._survIsBoss) attacker.bossKills = (attacker.bossKills || 0) + 1;  // opcode 223
   // Each medal is awarded AND announced separately — the client pops one per event, so folding
   // them into a single total would show one medal instead of "+1 Kill" followed by "Headshot".
   const killPts = medalScore("kill", victim, o.victimUid);
@@ -9118,12 +9169,12 @@ let SURVIVAL_START_DELAY_TICKS = S.define({
 }, (v) => { SURVIVAL_START_DELAY_TICKS = v; });
 
 let SURVIVAL_BASE_BOT_COUNT = S.define({
-  key: "survivalBaseBotCount", env: "EVIO_SURVIVAL_BASE_BOT_COUNT", type: "int", def: 2, min: 0, max: 24,
+  key: "survivalBaseBotCount", env: "EVIO_SURVIVAL_BASE_BOT_COUNT", type: "int", def: 8, min: 0, max: 24,
   category: "Survival", label: "Base bot count (wave 0)",
 }, (v) => { SURVIVAL_BASE_BOT_COUNT = v; });
 
 let SURVIVAL_BOT_COUNT_PER_WAVE = S.define({
-  key: "survivalBotCountPerWave", env: "EVIO_SURVIVAL_BOT_COUNT_PER_WAVE", type: "number", def: 1.5, min: 0, max: 20, step: 0.1,
+  key: "survivalBotCountPerWave", env: "EVIO_SURVIVAL_BOT_COUNT_PER_WAVE", type: "number", def: 0.2, min: 0, max: 20, step: 0.1,
   category: "Survival", label: "Bot count added per wave",
   desc: "Fractional is fine — the target count is floored, so e.g. 0.5 adds one bot every other "
       + "wave. Raised from the original 0.5 default so waves actually feel like they're throwing "
@@ -9131,7 +9182,7 @@ let SURVIVAL_BOT_COUNT_PER_WAVE = S.define({
 }, (v) => { SURVIVAL_BOT_COUNT_PER_WAVE = v; });
 
 let SURVIVAL_MAX_BOT_COUNT = S.define({
-  key: "survivalMaxBotCount", env: "EVIO_SURVIVAL_MAX_BOT_COUNT", type: "int", def: 300, min: 1, max: 2000,
+  key: "survivalMaxBotCount", env: "EVIO_SURVIVAL_MAX_BOT_COUNT", type: "int", def: 20, min: 1, max: 2000,
   category: "Survival", label: "Max bot count",
   desc: "Requested as effectively \"no limit\" — raised from the original 16/24 ceiling to a "
       + "number no realistic session reaches (even at the default +1.5/wave, a 2-hour run at "
@@ -9140,14 +9191,9 @@ let SURVIVAL_MAX_BOT_COUNT = S.define({
       + "hardware can't hold that many live bots.",
 }, (v) => { SURVIVAL_MAX_BOT_COUNT = v; });
 
-let SURVIVAL_LEVEL_UP_EVERY_N_WAVES = S.define({
-  key: "survivalLevelUpEveryNWaves", env: "EVIO_SURVIVAL_LEVEL_UP_EVERY_N_WAVES", type: "int", def: 3, min: 1, max: 100,
-  category: "Survival", label: "Bot level +1 every N waves",
-  desc: "Bot difficulty (1-10, same scale as botLevel) climbs by one every N waves, capped at 10.",
-}, (v) => { SURVIVAL_LEVEL_UP_EVERY_N_WAVES = v; });
 
 let SURVIVAL_BOSS_EVERY_N_WAVES = S.define({
-  key: "survivalBossEveryNWaves", env: "EVIO_SURVIVAL_BOSS_EVERY_N_WAVES", type: "int", def: 5, min: 1, max: 100,
+  key: "survivalBossEveryNWaves", env: "EVIO_SURVIVAL_BOSS_EVERY_N_WAVES", type: "int", def: 10, min: 1, max: 100,
   category: "Survival", label: "Boss every N waves",
   desc: "A tankier bot (see survivalBossDamageResist) spawns on top of the normal wave bots "
       + "every N waves — see survivalMaxSimultaneousBosses for how many can be alive at once.",
@@ -9162,18 +9208,10 @@ let SURVIVAL_MULTI_BOSS_EVERY_N_WAVES = S.define({
 }, (v) => { SURVIVAL_MULTI_BOSS_EVERY_N_WAVES = v; });
 
 let SURVIVAL_MAX_SIMULTANEOUS_BOSSES = S.define({
-  key: "survivalMaxSimultaneousBosses", env: "EVIO_SURVIVAL_MAX_SIMULTANEOUS_BOSSES", type: "int", def: 4, min: 1, max: 20,
+  key: "survivalMaxSimultaneousBosses", env: "EVIO_SURVIVAL_MAX_SIMULTANEOUS_BOSSES", type: "int", def: 1, min: 1, max: 20,
   category: "Survival", label: "Max simultaneous bosses",
 }, (v) => { SURVIVAL_MAX_SIMULTANEOUS_BOSSES = v; });
 
-let SURVIVAL_BOSS_DAMAGE_RESIST = S.define({
-  key: "survivalBossDamageResist", env: "EVIO_SURVIVAL_BOSS_DAMAGE_RESIST", type: "number", def: 0.2, min: 0.01, max: 1, step: 0.01,
-  category: "Survival", label: "Boss damage resistance",
-  desc: "Multiplies incoming damage to a boss bot (0.2 = takes 20% damage, i.e. ~5x the effective "
-      + "HP of a normal bot). Not an inflated health pool — healthPoints is normalized 0..1 and "
-      + "every other system (health bar %, regen, armor) relies on that staying true, so the boss "
-      + "is tankier by taking less damage per hit instead, which keeps its health bar meaningful.",
-}, (v) => { SURVIVAL_BOSS_DAMAGE_RESIST = v; });
 
 let SURVIVAL_BOSS_REWARD = S.define({
   key: "survivalBossReward", env: "EVIO_SURVIVAL_BOSS_REWARD", type: "int", def: 500, min: 0, max: 100000,
@@ -9243,7 +9281,7 @@ const SURVIVAL_MELEE_BOT_SKIN = {
 };
 
 let SURVIVAL_MELEE_BOT_RATIO = S.define({
-  key: "survivalMeleeBotRatio", env: "EVIO_SURVIVAL_MELEE_BOT_RATIO", type: "number", def: 0.7, min: 0, max: 1, step: 0.05,
+  key: "survivalMeleeBotRatio", env: "EVIO_SURVIVAL_MELEE_BOT_RATIO", type: "number", def: 0.8333, min: 0, max: 1, step: 0.05,
   category: "Survival", label: "Melee bot ratio",
   desc: "Fraction of each newly-spawned survival bot that's a zombie-skinned melee bot instead "
       + "of a gun bot — per the user's own live observation, most of an official survival lobby "
@@ -9308,12 +9346,14 @@ let SURVIVAL_REVIVER_HEAL_REWARD = S.define({
 const SPECIAL_WAVE_TYPES = [
   { name: "Rocket Wave", weight: 1, minWave: 5, weaponId: 8 },     // Rocket Launcher
   { name: "Grenade Wave", weight: 1, minWave: 5, weaponId: 283 },  // Grenade Launcher
-  { name: "Teleporters", weight: 3, minWave: 5, weaponId: null },  // no forced weapon — environmental
-  { name: "Smoke Wave", weight: 1, minWave: 5, weaponId: null },   // no forced weapon — environmental
+  // No forced weapon for these two — officially they raise a bot ABILITY level for the wave
+  // instead (abilityLevels: {AB_ID_TP: 3} / {AB_ID_SMOKE: 1}); the Smoke Wave is also noZombies.
+  { name: "Teleporters", weight: 3, minWave: 5, weaponId: null, abilityLevels: { 0: 3 } },
+  { name: "Smoke Wave", weight: 1, minWave: 5, weaponId: null, abilityLevels: { 9: 1 }, noZombies: true },
 ];
 
 let SURVIVAL_SPECIAL_WAVE_CHANCE = S.define({
-  key: "survivalSpecialWaveChance", env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE", type: "number", def: 0.3, min: 0, max: 1, step: 0.05,
+  key: "survivalSpecialWaveChance", env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE", type: "number", def: 0.2, min: 0, max: 1, step: 0.05,
   category: "Survival", label: "Special wave chance (base, at minWave)",
   desc: "Odds a NEW wave (past minWave=5) rolls as a special wave instead of a normal one, AT "
       + "the wave it first becomes eligible — see survivalSpecialWaveChanceRampPerWave for how "
@@ -9323,7 +9363,7 @@ let SURVIVAL_SPECIAL_WAVE_CHANCE = S.define({
 }, (v) => { SURVIVAL_SPECIAL_WAVE_CHANCE = v; });
 
 let SURVIVAL_SPECIAL_WAVE_CHANCE_RAMP = S.define({
-  key: "survivalSpecialWaveChanceRampPerWave", env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE_RAMP", type: "number", def: 0.01, min: 0, max: 0.1, step: 0.005,
+  key: "survivalSpecialWaveChanceRampPerWave", env: "EVIO_SURVIVAL_SPECIAL_WAVE_CHANCE_RAMP", type: "number", def: 0, min: 0, max: 0.1, step: 0.005,
   category: "Survival", label: "Special wave chance ramp (+ per wave)",
   desc: "Added to the base special-wave chance for every wave past minWave, capped at "
       + "survivalSpecialWaveChanceMax — a run that goes on for an hour should feel like special "
@@ -9360,10 +9400,10 @@ function pickSpecialWaveType() {
 // hardcoded 7-entry client-side palette — white(x2)/blue/purple/gold/magenta("Epic")/orange
 // ("Legendary"). Deathmatch always sends 274=0 (the plain white default, confirmed in our own
 // buildWeaponPickupBlock). Survival's own wpnTier1-4SpawnWeight constants (1/.7/.4/.2) pick a
-// loot tier per pickup; mapped here to the first four non-duplicate palette entries. (We could
-// not find ANY runtime consumer of maxWeaponTier/wpnTierNSpawnWeight in the client — the tier
-// system is entirely server-side, so which tier maps to which actual WEAPON is our own design
-// choice, not reverse-engineered: tier only changes the glow color here, not which weapon spawns.)
+// loot tier per pickup; mapped here to the first four non-duplicate palette entries. The tier is
+// not cosmetic: picking the weapon up carries it onto the player's weapon (opcode 134), and the
+// client's own getDmg()/getAoe() scale damage x1.15 and blast radius x1.1 per tier above 1 — see
+// survivalWeaponTier and _grantPickupWeapon.
 const SURVIVAL_TIER_WEIGHTS = [1, 0.7, 0.4, 0.2];          // tier 1..4, relative weight
 const SURVIVAL_TIER_GLOW_INDEX = [0, 2, 3, 4];             // tier 1..4 -> opcode 274 palette index
 
@@ -9394,7 +9434,7 @@ function pickWeightedTier() {
 const SURVIVAL_ITEM_INDEX = { HEALTH: 0, ARMOR: 1, NONE: -1 };
 
 let SURVIVAL_ITEM_CHANCE = S.define({
-  key: "survivalItemChance", env: "EVIO_SURVIVAL_ITEM_CHANCE", type: "number", def: 0.25, min: 0, max: 1, step: 0.05,
+  key: "survivalItemChance", env: "EVIO_SURVIVAL_ITEM_CHANCE", type: "number", def: 0.5, min: 0, max: 1, step: 0.05,
   category: "Survival", label: "Item chance per pickup reroll",
   desc: "Odds a pickup point becomes a health/armor item instead of a weapon each time it "
       + "rerolls (initial spawn, or after being taken) — confirmed real that items share the "
@@ -9418,7 +9458,7 @@ let SURVIVAL_ARMOR_KIT_AMOUNT = S.define({
 function _rollPickupItem() {
   if (GAME_MODE !== "survival") return SURVIVAL_ITEM_INDEX.NONE;
   if (Math.random() >= SURVIVAL_ITEM_CHANCE) return SURVIVAL_ITEM_INDEX.NONE;
-  return Math.random() < 0.5 ? SURVIVAL_ITEM_INDEX.HEALTH : SURVIVAL_ITEM_INDEX.ARMOR;
+  return Math.random() < 0.6 ? SURVIVAL_ITEM_INDEX.HEALTH : SURVIVAL_ITEM_INDEX.ARMOR;
 }
 
 // Ephemeral — not persisted, reset every round (startNewRound) and on mode switch. Deliberately
@@ -9431,10 +9471,10 @@ function _rollPickupItem() {
 // No waveStartTick of its own — match.roundStartTick (opcode 298) IS that anchor, the same one
 // the client's own wave-number formula uses, so our escalation and the client's independently-
 // computed HUD text can never drift apart.
-let survivalState = { currentWave: -1, bossPlayerIds: [], activeSpecialWave: null };
+let survivalState = { currentWave: -1, bossPlayerIds: [], activeSpecialWave: null, waveIsZombie: true };
 
 function resetSurvivalState() {
-  survivalState = { currentWave: -1, bossPlayerIds: [], activeSpecialWave: null };
+  survivalState = { currentWave: -1, bossPlayerIds: [], activeSpecialWave: null, waveIsZombie: true };
 }
 
 // Forces a bot onto the given weapon — same shape as spawnBot's own weapon-equip block, just
@@ -9458,6 +9498,154 @@ function _forceSurvivalBotWeapon(bot, weaponId) {
   bot.weaponId = weaponId;
 }
 
+// ── Official survival tuning ─────────────────────────────────────────────────────────────────
+// ev.io 1-7-1's own gameModes.survival / survivalParams values, verbatim. The wave and bot
+// spawning code is server-only and not in the client bundle, so the NUMBERS are official but how
+// some of them combine is our reading of the parameter names — each such reading is marked.
+const SURVIVAL_OFFICIAL = {
+  botBaseLvl: 2, botLvlWaveBonus: 0.08, botMaxLvl: 6,
+  // Gun ("human") bots: no per-wave growth at all officially.
+  botBaseSpeedPerc: 0.7, botSpeedWaveBonusPerc: 0, botSpeedMax: 1.1,
+  botBaseHPPerc: 1, botHPWaveBonusPerc: 0, botHPMax: 2,
+  botDmgMultiplierBase: 0.3, botDmgWaveMultiplierBonus: 0, botDmgMax: 0.15,
+  // Zombies start slow and weak and close the gap fast.
+  botZombieBaseSpeedPerc: 0.5, botZombieSpeedWaveBonusPerc: 0.1, botZombieSpeedMax: 1.1,
+  botZombieHPWaveBonusPerc: 0.01, botZombieHPMax: 2,
+  botZombieDmgMultiplierBase: 0.5, botZombieDmgWaveMultiplierBonus: 0.01, botZombieDmgMax: 0.45,
+  // Boss.
+  botBossBaseHealth: 10, botBossHealthWaveMultiplierBonus: 0.2, bossLevelPerWave: 0.2,
+  botBossDmgWaveMultiplierBonus: 0.02, botZombieBossDmgWaveMultiplierBonus: 0.005,
+  bossSpeedPerWaveBonus: 0.015, bossZombieSpeedPerWaveBonus: 0.005, bossMaxMoveSpeed: 1.5,
+  tripMinesKillBosses: false,
+  // Player side — these the client runs too (getDmg/getAoe), so they are exact.
+  maxWeaponTier: 4, tierDmg: 1.15, tierAoe: 1.1, pickupAmmoMultiplier: 2,
+  // Scoring (Score.getWaveMultiplier, GameConstants.BOSS_SCORE_MULTIPLIER).
+  wavesTillRewardDoubles: 10, bossScoreMultiplier: 20,
+};
+
+let SURVIVAL_BOT_RESPAWN_TICKS = S.define({
+  key: "survivalBotRespawnTicks", env: "EVIO_SURVIVAL_BOT_RESPAWN_TICKS", type: "int", def: 400, min: 20, max: 6000,
+  category: "Survival", label: "Bot respawn delay (ticks)",
+  desc: "How long a killed survival bot stays down before rejoining the horde. 400 = 20s at "
+      + "20Hz, the official botRespawnSec. A boss never respawns — it is removed when it dies.",
+}, (v) => { SURVIVAL_BOT_RESPAWN_TICKS = v; });
+
+// Official curve: 2 + 0.08 per wave, capped at 6. Rounded because botLevel is an integer dial.
+function survivalBotLevelForWave(wave) {
+  const o = SURVIVAL_OFFICIAL;
+  return Math.max(1, Math.round(Math.min(o.botMaxLvl, o.botBaseLvl + o.botLvlWaveBonus * Math.max(0, wave))));
+}
+
+// Per-bot multipliers for a wave. speed scales the movement caps, hpMult divides incoming damage
+// (health is normalized 0..1, so a bigger pool is expressed as taking proportionally less),
+// dmgMult scales outgoing damage and dmgCap is the most one hit may take off a full health bar.
+// READING: "<x>WaveBonus" is added once per wave; "botDmgMax" is a per-hit ceiling (the zombie
+// base multiplier 0.5 is already above its 0.45 "max", so it cannot be a cap on the multiplier).
+function survivalBotStatsForWave(wave, kind) {
+  const o = SURVIVAL_OFFICIAL, w = Math.max(0, wave), z = !!(kind && kind.zombie);
+  if (kind && kind.boss) {
+    const baseSpeed = z ? o.botZombieBaseSpeedPerc : o.botBaseSpeedPerc;
+    const baseDmg = z ? o.botZombieDmgMultiplierBase : o.botDmgMultiplierBase;
+    return {
+      speed: Math.min(o.bossMaxMoveSpeed, baseSpeed + (z ? o.bossZombieSpeedPerWaveBonus : o.bossSpeedPerWaveBonus) * w),
+      hpMult: o.botBossBaseHealth * (1 + o.botBossHealthWaveMultiplierBonus * w),
+      dmgMult: baseDmg + (z ? o.botZombieBossDmgWaveMultiplierBonus : o.botBossDmgWaveMultiplierBonus) * w,
+      dmgCap: null,
+    };
+  }
+  return z ? {
+    speed: Math.min(o.botZombieSpeedMax, o.botZombieBaseSpeedPerc + o.botZombieSpeedWaveBonusPerc * w),
+    hpMult: Math.min(o.botZombieHPMax, o.botBaseHPPerc + o.botZombieHPWaveBonusPerc * w),
+    dmgMult: o.botZombieDmgMultiplierBase + o.botZombieDmgWaveMultiplierBonus * w,
+    dmgCap: o.botZombieDmgMax,
+  } : {
+    speed: Math.min(o.botSpeedMax, o.botBaseSpeedPerc + o.botSpeedWaveBonusPerc * w),
+    hpMult: Math.min(o.botHPMax, o.botBaseHPPerc + o.botHPWaveBonusPerc * w),
+    dmgMult: o.botDmgMultiplierBase + o.botDmgWaveMultiplierBonus * w,
+    dmgCap: o.botDmgMax,
+  };
+}
+
+// Stamps a survival bot's wave stats where the single damage funnel (applyDamage) and the
+// movement code read them. Speed is written as base x multiplier from a remembered base, so
+// re-applying every wave never compounds.
+function applySurvivalBotStats(bot, wave) {
+  const p = bot && bot.playerState;
+  if (!p) return;
+  const st = survivalBotStatsForWave(wave, { zombie: !!bot.isZombie, boss: !!bot.isBoss });
+  p._survDmgMult = st.dmgMult;
+  p._survDmgCap = st.dmgCap;
+  p._survHpMult = st.hpMult;
+  p._survIsBoss = !!bot.isBoss;
+  const stats = p._ps && p._ps.Qz8l93a;
+  if (stats && Number.isFinite(stats.Q6o3kdb)) {
+    if (!bot._survBaseSpeed) bot._survBaseSpeed = { walk: stats.Q6o3kdb, sprint: stats.Q8i9f3s };
+    stats.Q6o3kdb = bot._survBaseSpeed.walk * st.speed;
+    if (Number.isFinite(bot._survBaseSpeed.sprint)) stats.Q8i9f3s = bot._survBaseSpeed.sprint * st.speed;
+  }
+}
+
+// Weapon, special-wave abilities and stats for one bot, for the wave now running. Called at
+// spawn, on every wave boundary, and on respawn. A weapon-forcing special wave only re-arms gun
+// bots: a zombie's whole identity (melee weapon, animations, opcode 240) is fixed at spawn.
+function applySurvivalWaveLoadout(bot, wave) {
+  const special = survivalState.activeSpecialWave;
+  const defaultWeapon = bot.isSwordBot ? ZOMBIE_MELEE_WEAPON_ID : 4;
+  _forceSurvivalBotWeapon(bot, (!bot.isZombie && special && special.weaponId) || defaultWeapon);
+  if (_live.setBotAbilityLevels) _live.setBotAbilityLevels(bot, special ? special.abilityLevels : null);
+  applySurvivalBotStats(bot, wave);
+  // The physics state is created lazily on the bot's first simulated tick, so at spawn neither
+  // the speed scale nor the ability levels can be written yet — tickSurvivalWaves finishes the
+  // job on the first tick the state exists.
+  bot._survLoadoutPending = (bot.playerState && bot.playerState._ps) ? null : wave;
+}
+
+function spawnSurvivalBot(wave) {
+  const zombie = !!survivalState.waveIsZombie;
+  // No flavor names in survival — these are faceless wave fodder, and the client hides bots
+  // from the scoreboard and kill feed once opcode 237 marks them.
+  const bot = _live.spawnBot({
+    level: survivalBotLevelForWave(wave), isSurvivalBot: true, name: "Bot", meleeBot: zombie,
+    ...(zombie ? { skinUrl: SURVIVAL_MELEE_BOT_SKIN.skinUrl, thumbUrl: SURVIVAL_MELEE_BOT_SKIN.thumbUrl } : {}),
+  });
+  applySurvivalWaveLoadout(bot, wave);
+  return bot;
+}
+
+// A dead survival bot, once per tick. Bosses are one-offs: marked for the same delayed removal a
+// round end uses. Everything else rejoins after the official 20s — as the CURRENT wave's kind, so
+// the horde turns over from zombies to gunmen (or back) as its members die rather than all at once.
+function survivalBotDeathTick(s, p) {
+  if (s._survivalPendingRemoveAtTick) return;
+  const tick = _live.globalTick || 0;
+  if (s.isBoss) { s._survivalPendingRemoveAtTick = tick + SURVIVAL_BOT_REMOVAL_GRACE_TICKS; return; }
+  if (p.deathStateTimer <= SURVIVAL_BOT_RESPAWN_TICKS) return;
+  const wave = Math.max(1, survivalState.currentWave);
+  if (!!s.isZombie !== !!survivalState.waveIsZombie && _live.spawnBot && _live.removeBot) {
+    _live.removeBot(s.playerId);
+    spawnSurvivalBot(wave);
+    return;
+  }
+  respawnPlayerNow(p);
+  s.botLevel = survivalBotLevelForWave(wave);
+  applySurvivalWaveLoadout(s, wave);
+}
+
+// Weapon tiers. The client's own getDmg()/getAoe() multiply by 1.15 / 1.1 per tier above 1 from
+// the tier we stream on opcode 134, so the server has to apply exactly the same factors.
+function survivalWeaponTier(p, nid) {
+  if (GAME_MODE !== "survival" || !p || !p.weaponTiers) return 1;
+  return Math.max(1, p.weaponTiers[nid] | 0);
+}
+function survivalTierDmgMult(p, nid) {
+  return Math.pow(SURVIVAL_OFFICIAL.tierDmg, survivalWeaponTier(p, nid) - 1);
+}
+
+// Score.getWaveMultiplier: 1 + min(wave / 10, 2), i.e. double by wave 10 and triple from wave 20.
+function survivalWaveScoreMultiplier() {
+  return 1 + Math.min(Math.max(0, survivalState.currentWave) / SURVIVAL_OFFICIAL.wavesTillRewardDoubles, 2);
+}
+
 // Official survival's own wave-number formula (confirmed from the real client bundle, Qmpb4uv):
 //   floor((elapsed - delayTicks) / waveTicks)   — then the HUD adds 1 to DISPLAY it ("Wave 1").
 // Negative while still inside the initial delay (displays as "Wave 0" — a deliberate grace
@@ -9475,6 +9663,12 @@ function tickSurvivalWaves(sessions) {
   if (GAME_MODE !== "survival" || match.gameMode !== 0) return;
   if (!_live.spawnBot) return;
 
+  for (const b of _live.listBots()) {
+    if (b._survLoadoutPending != null && b.playerState && b.playerState._ps) {
+      applySurvivalWaveLoadout(b, b._survLoadoutPending);
+    }
+  }
+
   const wave = survivalWaveNumber(_live.globalTick);
   if (wave <= survivalState.currentWave) return;
   survivalState.currentWave = wave;
@@ -9487,84 +9681,59 @@ function tickSurvivalWaves(sessions) {
   // client's own "0 bots alive" at the very start of a survival round.
   const targetCount = wave < 1 ? 0 : Math.min(
     SURVIVAL_MAX_BOT_COUNT,
-    Math.floor(SURVIVAL_BASE_BOT_COUNT + (wave - 1) * SURVIVAL_BOT_COUNT_PER_WAVE),
+    Math.floor(SURVIVAL_BASE_BOT_COUNT + (wave - 1) * SURVIVAL_BOT_COUNT_PER_WAVE + 1e-9),
   );
-  const targetLevel = Math.min(10, 5 + Math.floor(Math.max(0, wave - 1) / SURVIVAL_LEVEL_UP_EVERY_N_WAVES));
+  const targetLevel = survivalBotLevelForWave(wave);
 
-  while (survivalBots().length < targetCount) {
-    // No flavor names in survival — these are faceless wave fodder, not deathmatch's named bots,
-    // and the official client hides them from the scoreboard/kill feed entirely anyway once
-    // opcode 237 (isBot) marks them (see buildPeerBootstrapDelta) — a name would never be seen.
-    // A fraction of the pool (most of it, by default) are zombie melee bots — the real
-    // "Zombie Melee" weapon + zombiebot skin, Teleport capped at 1 charge instead of 5 (see
-    // SURVIVAL_MELEE_BOT_ABILITY_SEED's own comment) — rather than the default gun+sword loadout.
-    const meleeBot = Math.random() < SURVIVAL_MELEE_BOT_RATIO;
-    _live.spawnBot({
-      level: targetLevel, isSurvivalBot: true, name: "Bot", meleeBot,
-      ...(meleeBot ? { skinUrl: SURVIVAL_MELEE_BOT_SKIN.skinUrl, thumbUrl: SURVIVAL_MELEE_BOT_SKIN.thumbUrl } : {}),
-    });
-  }
+  // The special wave is rolled first because it decides what the wave is made of.
+  survivalState.activeSpecialWave = (wave >= 1 && Math.random() < _survivalSpecialWaveChanceForWave(wave, 5))
+    ? pickSpecialWaveType() : null;
+  const special = survivalState.activeSpecialWave;
+  // Official composition roll: a wave is ALL zombies (fullZombieWaveWeight 1) or ALL gunmen
+  // (fullHumanWaveWeight 0.2), never mixed — survivalMeleeBotRatio is that 1 : 0.2 chance. The
+  // Smoke Wave is flagged noZombies officially; a weapon-forcing wave (Rocket/Grenade) is treated
+  // the same way here, since a zombie cannot carry the launcher the wave is named for.
+  survivalState.waveIsZombie = !(special && (special.noZombies || special.weaponId))
+    && Math.random() < SURVIVAL_MELEE_BOT_RATIO;
+
+  while (survivalBots().length < targetCount) spawnSurvivalBot(wave);
   const excess = survivalBots().length - targetCount;
   if (excess > 0) {
     for (const b of survivalBots().slice(targetCount)) _live.removeBot(b.playerId);
   }
-  // Existing survival bots climb in difficulty too, same as botLevel's own onChange does for the
-  // deathmatch pool — a wave escalating is supposed to make EVERY bot in it sharper, not just the
-  // newly-spawned ones.
-  for (const b of survivalBots()) b.botLevel = targetLevel;
-
-  // Special waves — rolled once per wave (minWave=5), bot-only forced loadout for the duration.
-  // Re-applied to every survival bot (new AND existing) on every wave boundary, whether this
-  // wave rolled a special type or not — that one assignment naturally both applies a forced
-  // weapon when one starts and reverts everyone to the default weapon when it ends, with no
-  // separate "end of special wave" bookkeeping needed. The chance itself RAMPS with wave number
-  // (see _survivalSpecialWaveChanceForWave) — a run that goes on for an hour should feel like
-  // special waves come thicker and faster deep in, not stay stuck at the wave-5 rate forever.
-  survivalState.activeSpecialWave = (wave >= 1 && Math.random() < _survivalSpecialWaveChanceForWave(wave, 5))
-    ? pickSpecialWaveType() : null;
-  // A melee bot's OWN default is the sword, not the gun — reverting it to a flat weaponId 4
-  // whenever no special wave is active would silently strip its melee loadout every wave. Only
-  // an ACTIVE weapon-forcing special wave (Rocket/Grenade) overrides a melee bot's sword too,
-  // matching "force-equip the bots" applying to every bot, melee or not.
-  for (const b of survivalBots()) {
-    // survivalBots() only ever contains survival bots, so isSwordBot=true here always means a
-    // melee bot (the deathmatch sword-bot pool is a separate, excluded set) — its default is the
-    // Zombie Melee weapon, not the sword.
-    const defaultWeapon = b.isSwordBot ? ZOMBIE_MELEE_WEAPON_ID : 4;
-    const forcedWeaponId = (survivalState.activeSpecialWave && survivalState.activeSpecialWave.weaponId)
-      || defaultWeapon;
-    _forceSurvivalBotWeapon(b, forcedWeaponId);
-  }
-  if (survivalState.activeSpecialWave) {
-    console.log(`[evio-local] survival: wave ${wave} special wave — ${survivalState.activeSpecialWave.name}`);
-  }
+  // Every bot already in the horde moves to this wave's level, loadout and stats too — a wave
+  // escalating makes all of them sharper, not just the newly spawned ones.
+  for (const b of survivalBots()) { b.botLevel = targetLevel; applySurvivalWaveLoadout(b, wave); }
+  if (special) console.log(`[evio-local] survival: wave ${wave} special wave — ${special.name}`);
 
   if (wave >= 1 && wave % SURVIVAL_BOSS_EVERY_N_WAVES === 0) {
     if (!Array.isArray(survivalState.bossPlayerIds)) survivalState.bossPlayerIds = [];
-    survivalState.bossPlayerIds = survivalState.bossPlayerIds.filter((id) => sessions.get(id));
-    // Deep into a long run, more than one boss fights alongside each other — a flat "wait for
-    // the one boss to die" pace would never escalate again past whatever wave first introduced
-    // it, which is exactly the kind of multi-hour plateau this is meant to avoid. Scales slowly
-    // (every survivalMultiBossEveryNWaves waves adds one) and caps at
-    // survivalMaxSimultaneousBosses.
+    survivalState.bossPlayerIds = survivalState.bossPlayerIds.filter((id) => {
+      const b = sessions.get(id);
+      return b && !b._survivalPendingRemoveAtTick;
+    });
+    // One boss officially; survivalMaxSimultaneousBosses > 1 re-enables the extra-boss scaling.
     const desiredBossCount = Math.min(SURVIVAL_MAX_SIMULTANEOUS_BOSSES,
       1 + Math.floor(wave / SURVIVAL_MULTI_BOSS_EVERY_N_WAVES));
+    const zombieBoss = !!survivalState.waveIsZombie;
+    const bossLevel = Math.min(10, Math.round(targetLevel + SURVIVAL_OFFICIAL.bossLevelPerWave * wave));
     while (survivalState.bossPlayerIds.length < desiredBossCount) {
-      // Random name + skin per boss spawn, matching the "slightly bigger" look confirmed from
-      // the real client's own bossScale gamemode constant — see spawnBot's own comment for how
-      // these three opts get applied.
       const bossName = SURVIVAL_BOSS_NAMES[Math.floor(Math.random() * SURVIVAL_BOSS_NAMES.length)];
-      const bossSkin = SURVIVAL_BOSS_SKINS[Math.floor(Math.random() * SURVIVAL_BOSS_SKINS.length)];
+      const bossSkin = zombieBoss ? SURVIVAL_MELEE_BOT_SKIN
+        : SURVIVAL_BOSS_SKINS[Math.floor(Math.random() * SURVIVAL_BOSS_SKINS.length)];
       const boss = _live.spawnBot({
-        level: 10, isSurvivalBot: true, isBoss: true, name: bossName,
+        level: bossLevel, isSurvivalBot: true, isBoss: true, name: bossName, meleeBot: zombieBoss,
         skinUrl: bossSkin.skinUrl, thumbUrl: bossSkin.thumbUrl, modelScale: SURVIVAL_BOSS_SCALE,
       });
+      applySurvivalWaveLoadout(boss, wave);
       survivalState.bossPlayerIds.push(boss.playerId);
       console.log(`[evio-local] survival: wave ${wave} boss spawned (${boss.playerId}, `
-        + `${survivalState.bossPlayerIds.length}/${desiredBossCount} active)`);
+        + `${survivalState.bossPlayerIds.length}/${desiredBossCount} active, `
+        + `health x${boss.playerState._survHpMult.toFixed(0)})`);
     }
   }
-  console.log(`[evio-local] survival: wave ${wave} — bots=${targetCount} level=${targetLevel}`);
+  console.log(`[evio-local] survival: wave ${wave} — ${survivalState.waveIsZombie ? "zombies" : "gunmen"} `
+    + `bots=${targetCount} level=${targetLevel}`);
 }
 
 // ── Rolling metrics history (for the dashboard's graphs) ─────────────────────
@@ -9970,6 +10139,7 @@ function startServer() {
   // the only place these live). Assigned here, right where `sessions` itself is exposed, so admin
   // dashboard controls (via the module.exports wrappers) reach this exact running instance.
   _live.spawnBot = null;
+  _live.setBotAbilityLevels = null;
   _live.removeBot = null;
   _live.listBots = null;
 
@@ -11054,6 +11224,24 @@ function startServer() {
   function listBots() {
     return [...sessions.values()].filter((s) => s && s.isBot);
   }
+  // Raises (never lowers) a live bot's ability levels for a special wave and recomputes its real
+  // stats through the same computeWeaponStats path a join uses; null restores the bot's own seed.
+  _live.setBotAbilityLevels = (bot, levels) => {
+    const p = bot && bot.playerState, ps = p && p._ps;
+    if (!ps || !ps.Qz8l93a) return;
+    if (!bot._baseAbilitySeed) bot._baseAbilitySeed = (ps.weaponStateArray || []).slice();
+    const seed = bot._baseAbilitySeed.slice();
+    if (levels) for (const k of Object.keys(levels)) seed[+k] = Math.max(seed[+k] || 0, levels[k]);
+    const key = seed.join(",");
+    if (bot._abilitySeedKey === undefined && !levels) { bot._abilitySeedKey = key; return; }
+    if (bot._abilitySeedKey === key) return;
+    bot._abilitySeedKey = key;
+    const clean = _sanitizeAbilitySeed(seed);
+    Object.assign(ps.Qz8l93a, computeWeaponStats(clean));
+    refreshMagazineCapacity(p);
+    ps.weaponStateArray = clean;
+    bot._survBaseSpeed = null;   // stats were just rebuilt from scratch — re-base the speed scale
+  };
   _live.spawnBot = spawnBot;
   _live.removeBot = removeBot;
   _live.listBots = listBots;
@@ -12214,6 +12402,12 @@ const serverExports = {
   // reasoning as getSessions()/getParityRings() above for other reassignable module state).
   tickSurvivalWaves,
   survivalWaveNumber,
+  SURVIVAL_OFFICIAL,
+  survivalBotLevelForWave,
+  survivalBotStatsForWave,
+  survivalWeaponTier,
+  getLiveHooks: () => _live,
+  medalScore,
   tickSurvivalRevives,
   tickSurvivalBotRemoval,
   pickWeightedTier,
