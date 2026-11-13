@@ -162,6 +162,14 @@ window.addEventListener('load', () => {
         return REGION_NAMES[code] || code.toUpperCase();
     }
 
+    // null = not measured yet, false = measured but unreachable, number = ms.
+    function regionLatencyLabel(code) {
+        if (!code || !(code in REGION_LATENCY)) return '';
+        const ms = REGION_LATENCY[code];
+        if (ms === null) return ' (unreachable)';
+        return ` (${ms}ms)`;
+    }
+
     // ----------------- CSS -----------------
 
     addStyle(`
@@ -610,6 +618,7 @@ window.addEventListener('load', () => {
     let lobbiesLoaded = false;
     let lobbiesLoading = false;
     let playerCountPollTimer = null;
+    let REGION_LATENCY = {}; // region id -> ms, or null if unreachable
 
     // Counts only auto-refreshed on open/reopen before this; now also polls every 5s while the
     // panel is actually visible, so it doesn't drift stale if someone leaves it open. Fetches are
@@ -1704,7 +1713,7 @@ window.addEventListener('load', () => {
 
         const name = document.createElement('div');
         name.className = 'ev-lobby-name';
-        name.textContent = `[${prettyRegion(lobby.region)}] ${prettyGamemode(lobby.gamemode)}`;
+        name.textContent = `[${prettyRegion(lobby.region)}${regionLatencyLabel(lobby.region)}] ${prettyGamemode(lobby.gamemode)}`;
 
         const players = document.createElement('div');
         players.className = 'ev-lobby-players';
@@ -1765,6 +1774,34 @@ window.addEventListener('load', () => {
         { id: 'fra', name: 'Europe', httpUrl: 'https://ev-game-eu.139.59.151.96.sslip.io' },
         { id: 'sin', name: 'Asia', httpUrl: 'https://ev-game-asia.188.166.184.152.sslip.io' },
     ];
+
+    // Same /ping endpoint the official client itself pings for latency-based region selection
+    // (confirmed from fetchRegionRecommendation() in the live bundle — it pings twice per region,
+    // the first as a TLS/TCP warm-up it discards, timing only the second). One measured ping per
+    // region is plenty for a display badge here; we're not picking a region automatically, just
+    // showing the number, so the warm-up round trip isn't worth the extra requests. 4s timeout
+    // per region — these are tiny unauthenticated GETs (Access-Control-Allow-Origin: *), the same
+    // kind of call the game itself already makes on every cold matchmaking attempt.
+    async function refreshRegionLatency() {
+        await Promise.allSettled(
+            MATCHMAKER_REGIONS.map(async (region) => {
+                const controller = new AbortController();
+                const timer = setTimeout(() => controller.abort(), 4000);
+                try {
+                    const start = performance.now();
+                    const resp = await fetch(`${region.httpUrl}/ping`, { cache: 'no-store', signal: controller.signal });
+                    if (!resp.ok) throw new Error('ping failed');
+                    await resp.text();
+                    REGION_LATENCY[region.id] = Math.round(performance.now() - start);
+                } catch (e) {
+                    REGION_LATENCY[region.id] = null;
+                } finally {
+                    clearTimeout(timer);
+                }
+            })
+        );
+        renderLobbyList();
+    }
 
     async function loadLobbiesFromBundle() {
         if (lobbiesLoaded || lobbiesLoading) return;
@@ -1943,6 +1980,7 @@ async function refreshPlayerCounts() {
     // panel/data loading logic lives in exactly one place.
     function openLobbyBrowser() {
         showLobbyModule();
+        refreshRegionLatency(); // cheap (3 tiny GETs), refresh every open rather than caching
         if (!lobbiesLoaded && !lobbiesLoading) {
             setStatus('Loading lobby list ...');
             loadLobbiesFromBundle();

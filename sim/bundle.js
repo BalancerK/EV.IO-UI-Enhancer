@@ -23839,7 +23839,7 @@ var EvioSim = (() => {
         response = 1;
         break;
       case "18":
-        response = { Qzfaeyw: weapons_default, Ql1n0js: null };
+        response = { rawWeaponsData: weapons_default, minigame: null };
         break;
       case "14":
         response = "none";

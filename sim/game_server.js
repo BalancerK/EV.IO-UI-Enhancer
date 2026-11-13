@@ -2107,9 +2107,15 @@ function handleBacktickRpc(ws, text) {
       response = 1;
       break;
     case "18":
-      // Loadout/weapons bootstrap used immediately after join. The client reads
-      // Qzfaeyw with hb.Qhkjwni.Ql2t0ys(...) and optionally Ql1n0js overrides.
-      response = { Qzfaeyw: cachedWeaponsData, Ql1n0js: null };
+      // ev.io 1-7-1 repurposed this code: it used to be a loadout bootstrap reply (the old
+      // Qzfaeyw/Ql1n0js shape below), now the client calls it as getMatchConfig() right after
+      // connectToGame(), and immediately does
+      // WeaponsData.parseRaw(response.rawWeaponsData) — the EXACT same Drupal JSON:API shape
+      // (data[]/included[]) that code "2" (getRawWeaponsData) already returns via
+      // cachedWeaponsData, so we just reuse it here. response.minigame must stay null for a
+      // normal (non-minigame) match — connectToGame only reads it at all when it's non-null,
+      // to override the game mode for NFT-drop minigames, which this server doesn't implement.
+      response = { rawWeaponsData: cachedWeaponsData, minigame: null };
       break;
     case "14":
       // Twitch/promos HTML. Empty hidden HTML avoids a pending promise without
