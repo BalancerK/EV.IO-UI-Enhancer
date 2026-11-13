@@ -26073,6 +26073,7 @@ var EvioSim = (() => {
     if (SERVER_ZOOM && ps2) {
       const wasZoom = ps2.Qgk2mcg;
       ps2.Qgk2mcg = !!(ps2.Qq7zdfv > 0 && held.has(6) && weaponHasZoom(p2.equippedWeaponId) && (p2.reloadTicks || 0) < 1);
+      if (Number.isFinite(ps2.Qcqj5jb)) ps2.Qcqj5jb = Math.min(9999, ps2.Qcqj5jb + 1);
       if (wasZoom !== ps2.Qgk2mcg) ps2.Qcqj5jb = 0;
       if (ps2.Qgk2mcg) {
         ps2.Qcdx4mh = false;
@@ -27839,8 +27840,11 @@ var EvioSim = (() => {
       //   "zooming  =>  Server: true   Client: false"
       144,
       !!(playerState._ps && playerState._ps.Qgk2mcg),
+      // 145 ticksSinceSwitchedZoom — drives the ADS lerp (getCurrentZoomLvl) and the scope-overlay
+      // fade. A constant 9999 made every zoom transition instant for peers, and for the local
+      // player after any reconcile. Not a reconciler-compared field.
       145,
-      9999,
+      Number.isFinite(_psOf(playerState).Qcqj5jb) ? _psOf(playerState).Qcqj5jb : 9999,
       // 146 actionTickCounter — the real per-player value (maintained in integratePlayerSim), NOT
       // a constant. This is what makes peers visibly swing/fire: the client plays SWORD_SLASH on
       // `0 === actionTickCounter` (:51539) and the fire pose likewise (:48137). Hardcoding 9999
@@ -27851,8 +27855,11 @@ var EvioSim = (() => {
       // never showed a jump puff.
       149,
       Number.isFinite(playerState.jumpTick) ? playerState.jumpTick : 9999,
+      // 150 ticksSinceLastDeath — 0 on the death tick. Only read by the ragdoll code, which holds
+      // the body for 22 ticks when the killing weapon has shockDeath (Trip Mine); a constant 9999
+      // skipped that. deathStateTimer is 1 on the death tick, hence the -1.
       150,
-      9999,
+      playerState.deathStateTimer > 0 ? playerState.deathStateTimer - 1 : 9999,
       151,
       playerState.slideBoostTick || 0,
       // 155/156 Qcqglqd/Qte59p5 — player model scale. See SURVIVAL_BOSS_SCALE's own comment.

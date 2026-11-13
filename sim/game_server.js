@@ -4830,7 +4830,11 @@ function preTickFire(p, frames) {
     const wasZoom = ps.Qgk2mcg;
     ps.Qgk2mcg = !!(ps.Qq7zdfv > 0 && held.has(6)
                     && weaponHasZoom(p.equippedWeaponId) && (p.reloadTicks || 0) < 1);
-    if (wasZoom !== ps.Qgk2mcg) ps.Qcqj5jb = 0;                 // reset zoom-transition counter on change
+    // ticksSinceSwitchedZoom (opcode 145). The client steps it at the top of its tick
+    // (tickPlayerStateCounters) and only then zeroes it on a zoom change, so the change tick ends
+    // at 0 — advance before the reset to keep that order. It was reset here but never advanced.
+    if (Number.isFinite(ps.Qcqj5jb)) ps.Qcqj5jb = Math.min(9999, ps.Qcqj5jb + 1);
+    if (wasZoom !== ps.Qgk2mcg) ps.Qcqj5jb = 0;
     if (ps.Qgk2mcg) { ps.Qcdx4mh = false; ps.Qkno30b = false; } // zooming clears dancing/examining
     // Keep OUR emote flags in step with the client, which clears isDancing/isExamining on zoom
     // (here) and on every shot (Qswb1wq). Without this the server would keep streaming
@@ -7633,7 +7637,10 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       // zooming is a reconciler-compared field, so that diverged every tick the button was held:
       //   "zooming  =>  Server: true   Client: false"
       144, !!(playerState._ps && playerState._ps.Qgk2mcg),
-      145, 9999,
+      // 145 ticksSinceSwitchedZoom — drives the ADS lerp (getCurrentZoomLvl) and the scope-overlay
+      // fade. A constant 9999 made every zoom transition instant for peers, and for the local
+      // player after any reconcile. Not a reconciler-compared field.
+      145, Number.isFinite(_psOf(playerState).Qcqj5jb) ? _psOf(playerState).Qcqj5jb : 9999,
       // 146 actionTickCounter — the real per-player value (maintained in integratePlayerSim), NOT
       // a constant. This is what makes peers visibly swing/fire: the client plays SWORD_SLASH on
       // `0 === actionTickCounter` (:51539) and the fire pose likewise (:48137). Hardcoding 9999
@@ -7642,7 +7649,10 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       // 149 Qezbnmf — ticks since the last jump. Was hardcoded 9999, so it was never 0 and peers
       // never showed a jump puff.
       149, Number.isFinite(playerState.jumpTick) ? playerState.jumpTick : 9999,
-      150, 9999,
+      // 150 ticksSinceLastDeath — 0 on the death tick. Only read by the ragdoll code, which holds
+      // the body for 22 ticks when the killing weapon has shockDeath (Trip Mine); a constant 9999
+      // skipped that. deathStateTimer is 1 on the death tick, hence the -1.
+      150, playerState.deathStateTimer > 0 ? playerState.deathStateTimer - 1 : 9999,
       151, playerState.slideBoostTick || 0,
       // 155/156 Qcqglqd/Qte59p5 — player model scale. See SURVIVAL_BOSS_SCALE's own comment.
       155, Number.isFinite(playerState.modelScale) ? playerState.modelScale : 1,
