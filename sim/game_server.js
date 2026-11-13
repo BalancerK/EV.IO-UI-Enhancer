@@ -2107,14 +2107,13 @@ function handleBacktickRpc(ws, text) {
       response = 1;
       break;
     case "18":
-      // ev.io 1-7-1 repurposed this code: it used to be a loadout bootstrap reply (the old
-      // Qzfaeyw/Ql1n0js shape below), now the client calls it as getMatchConfig() right after
-      // connectToGame(), and immediately does
-      // WeaponsData.parseRaw(response.rawWeaponsData) — the EXACT same Drupal JSON:API shape
-      // (data[]/included[]) that code "2" (getRawWeaponsData) already returns via
-      // cachedWeaponsData, so we just reuse it here. response.minigame must stay null for a
-      // normal (non-minigame) match — connectToGame only reads it at all when it's non-null,
-      // to override the game mode for NFT-drop minigames, which this server doesn't implement.
+      // getMatchConfig(): called right after connectToGame(); the client immediately runs
+      // WeaponsData.parseRaw(response.rawWeaponsData) on the same Drupal JSON:API shape
+      // (data[]/included[]) that code "2" (getRawWeaponsData) returns, so cachedWeaponsData is
+      // reused. NOT a new RPC — this was always code 18; in 1-7-0 its reply keys were the
+      // obfuscated Qzfaeyw/Ql1n0js, and 1-7-1 (built with property obfuscation off) reads the
+      // same two fields as rawWeaponsData/minigame. minigame stays null for a normal match;
+      // the client only reads it when non-null, for NFT-drop minigames we don't implement.
       response = { rawWeaponsData: cachedWeaponsData, minigame: null };
       break;
     case "14":
@@ -8300,13 +8299,13 @@ function applyLiveLoadout(session, playerState, jsonStr, sessions) {
  * Player-cosmetics roster sync using the CLIENT'S OWN native channel — no userscript
  * shadow store.
  *
- * ev.io 1-7-1 REPLACED this whole mechanism. The old one (getPlayerProps/createPlayerPropStore,
- * keyed by obfuscated PlayerPropKey values like 'Qh52c4d') is gone entirely from the 1-7-1
- * bundle. In its place is a now fully-readable "AdditionalUserInfo" system: the client's
- * notification handler (bundle `_`, case '3') receives a '~3`<json>' event containing an ARRAY
- * of { user, field, value } tuples, clears its whole per-user info map, and for each tuple does
- * `v[user] ||= getNewAdditionalUserInfo(); v[user][field] = value`. getNewAdditionalUserInfo()'s
- * own defaults (readable now) are where the field names below come from, each one confirmed
+ * Same mechanism in 1-7-0 and 1-7-1 — only the names differ. 1-7-1 is built with property-name
+ * obfuscation off, and these are JSON keys, so the tuple that used to be
+ * { Qwhkhza, Qcxi0k5, Qcou9jy } is now { user, field, value } and every field value changed
+ * with it (work/q_names_171.json has the full old->new table). The client's notification
+ * handler (case '3') receives a '~3`<json>' ARRAY of those tuples, clears its per-user info map,
+ * and for each one does `v[user] ||= getNewAdditionalUserInfo(); v[user][field] = value`.
+ * getNewAdditionalUserInfo()'s defaults are where the field names below come from, each confirmed
  * against its OWN rendering code in the live bundle — e.g. skinTier:
  *   '<div class="msg_profile_score '+o.skinTier.toLowerCase()+'">'
  * and clanHomepage, paired with the per-entity clanInsignia image (opcode 235) exactly like the
@@ -8766,31 +8765,33 @@ const GRENADE_SETTLE_SPEED = 0.5;
 const MULTIKILL_MEDAL = { 2: "double", 3: "multi", 4: "ultra", 5: "monster" };
 const STREAK_MEDAL = { 5: "spree", 10: "rampage", 15: "dominating", 20: "unstoppable", 25: "godlike" };
 
-// Our medal names -> the client's Qkkc81w keys. The client identifies a medal by this STRING
-// (Qwhr325), and uses it to pick the popup text and icon; every score below was cross-checked
-// against Qkkc81w.<key>.Qcqgb7h and matches MEDAL_SCORE exactly.
+// Our medal names -> the client's scoreEvents keys. The client identifies a medal by this STRING
+// (the event's `kind`) and uses it to pick the popup text and icon; every score below was
+// cross-checked against scoreEvents.<key>.score and matches MEDAL_SCORE exactly. These are the
+// 1-7-1 keys: that build ships with property-name obfuscation off, so the table that used to be
+// keyed Qwhr33n/Qh04ltj/... is now keyed kill/headshot/..., and the old strings match nothing.
 const MEDAL_KEY = {
-  kill:     "Qwhr33n",   // + 1 Kill            100
-  headshot: "Qh04ltj",   // Headshot             10
-  sword:    "Qcq3jgy",   // Sword Kill           20
-  sticky:   "Qvnv1p4",   // Sticky Grenade Kill  10
-  frag:     "Qwhu3mn",   // Frag Grenade Kill    10
-  mine:     "Qwhpt32",   // Mine Kill            10
-  tripmine: "Qqfl31j",   // Trip Mine Kill       10
-  longshot: "Qwuvmcb",   // Longshot             10
-  assist:   "Qn4okig",   // Assist               10
-  grave:    "Qcwsjt6",   // Kill From The Grave  15
-  noscope:  "Ql8t342",   // Noscope Kill         20
-  usurper:  "Qc74s4x",   // Usurper              25
-  double:   "Qlnn3me",   // Double Kill          20
-  multi:    "Qlnn3md",   // Multi Kill           45
-  ultra:    "Qlnn3mc",   // Ultra Kill           80
-  monster:  "Qlnn3mb",   // Monster Kill        130
-  spree:    "Qvltnhr",   // Killing Spree        40
-  rampage:  "Qen1jff",   // Rampage              80
-  dominating: "Qen1jfa", // Dominating          120
-  unstoppable: "Qen1jek",// Unstoppable         160
-  godlike:  "Qen1jef",   // Godlike             220
+  kill:     "kill",   // + 1 Kill            100
+  headshot: "headshot",   // Headshot             10
+  sword:    "sword",   // Sword Kill           20
+  sticky:   "sticky",   // Sticky Grenade Kill  10
+  frag:     "frag",   // Frag Grenade Kill    10
+  mine:     "mine",   // Mine Kill            10
+  tripmine: "tripmine",   // Trip Mine Kill       10
+  longshot: "longshot",   // Longshot             10
+  assist:   "assist",   // Assist               10
+  grave:    "grave",   // Kill From The Grave  15
+  noscope:  "noScopeKill",   // Noscope Kill         20
+  usurper:  "kill1stRank",   // Usurper              25
+  double:   "multikill2",   // Double Kill          20
+  multi:    "multikill3",   // Multi Kill           45
+  ultra:    "multikill4",   // Ultra Kill           80
+  monster:  "multikill5",   // Monster Kill        130
+  spree:    "spree5",   // Killing Spree        40
+  rampage:  "spree10",   // Rampage              80
+  dominating: "spree15", // Dominating          120
+  unstoppable: "spree20",// Unstoppable         160
+  godlike:  "spree25",   // Godlike             220
 };
 
 // Medals awarded this tick, drained into the playerMap block by buildPlayerMapBlock.

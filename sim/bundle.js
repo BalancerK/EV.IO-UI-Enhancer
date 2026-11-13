@@ -28648,47 +28648,47 @@ var EvioSim = (() => {
   var MULTIKILL_MEDAL = { 2: "double", 3: "multi", 4: "ultra", 5: "monster" };
   var STREAK_MEDAL = { 5: "spree", 10: "rampage", 15: "dominating", 20: "unstoppable", 25: "godlike" };
   var MEDAL_KEY = {
-    kill: "Qwhr33n",
+    kill: "kill",
     // + 1 Kill            100
-    headshot: "Qh04ltj",
+    headshot: "headshot",
     // Headshot             10
-    sword: "Qcq3jgy",
+    sword: "sword",
     // Sword Kill           20
-    sticky: "Qvnv1p4",
+    sticky: "sticky",
     // Sticky Grenade Kill  10
-    frag: "Qwhu3mn",
+    frag: "frag",
     // Frag Grenade Kill    10
-    mine: "Qwhpt32",
+    mine: "mine",
     // Mine Kill            10
-    tripmine: "Qqfl31j",
+    tripmine: "tripmine",
     // Trip Mine Kill       10
-    longshot: "Qwuvmcb",
+    longshot: "longshot",
     // Longshot             10
-    assist: "Qn4okig",
+    assist: "assist",
     // Assist               10
-    grave: "Qcwsjt6",
+    grave: "grave",
     // Kill From The Grave  15
-    noscope: "Ql8t342",
+    noscope: "noScopeKill",
     // Noscope Kill         20
-    usurper: "Qc74s4x",
+    usurper: "kill1stRank",
     // Usurper              25
-    double: "Qlnn3me",
+    double: "multikill2",
     // Double Kill          20
-    multi: "Qlnn3md",
+    multi: "multikill3",
     // Multi Kill           45
-    ultra: "Qlnn3mc",
+    ultra: "multikill4",
     // Ultra Kill           80
-    monster: "Qlnn3mb",
+    monster: "multikill5",
     // Monster Kill        130
-    spree: "Qvltnhr",
+    spree: "spree5",
     // Killing Spree        40
-    rampage: "Qen1jff",
+    rampage: "spree10",
     // Rampage              80
-    dominating: "Qen1jfa",
+    dominating: "spree15",
     // Dominating          120
-    unstoppable: "Qen1jek",
+    unstoppable: "spree20",
     // Unstoppable         160
-    godlike: "Qen1jef"
+    godlike: "spree25"
     // Godlike             220
   };
   var _pendingMedals = [];
