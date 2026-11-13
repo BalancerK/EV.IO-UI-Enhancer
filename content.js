@@ -57,31 +57,14 @@ function applySurvivalBestTime() {
 
 function applyHudAdjustments(){
     applySurvivalBestTime();
-    const selectors = ['#canvas','#canvas2','#game_hud','#game_menu_overlay','#lobbyBG','#fracSurPWDiv'];
-    selectors.forEach(sel => {
-        const el = document.querySelector(sel);
-        if(el) el.style.setProperty('height','100vh','important');
-    });
 
-    const move = el => {
-        if(el) {
-            el.style.transform = 'translateY(85px)';
-            el.style.transition = 'transform 0.3s ease';
-        }
-    };
-    move(document.getElementById('chat-window'));
-    move(document.querySelector('#game_hud_inner #lower_left_container'));
-
-    const weapons = document.querySelector('#game_hud_inner #weaponsDiv');
-    if(weapons){
-        weapons.style.setProperty('transform','translateY(100px)','important');
-        weapons.style.setProperty('transition','transform 0.3s ease','important');
-    }
-
-    // Ad-removal patch DROPPED (ev.io 1-7-1): the old #ad_728 banner + the CSS reserving a 90px
-    // footer for it are both gone from the real page now. The new ad system (Freestar,
-    // #freestar-leaderboard) ships `hidden` by default and the site's own layout is already
-    // full-height with no ad-reserved space — nothing left here for us to remove or work around.
+    // Ad-removal patch, AND the height-forcing/translateY pull-downs that went with it, both
+    // DROPPED (ev.io 1-7-1): the old #ad_728 banner + the CSS reserving a 90px footer for it are
+    // both gone from the real page now. The new ad system (Freestar, #freestar-leaderboard) ships
+    // `hidden` by default and the site's own layout is already full-height with no ad-reserved
+    // space, so forcing #canvas/#canvas2/etc to 100vh and then shoving chat/abilities (85px) and
+    // weapons (100px) back down to compensate just pushed them below where they already,
+    // correctly, sit on their own now — nothing left here for us to remove or work around.
 
     const crosshair = document.getElementById('canvas_crosshair');
     if (crosshair) {
