@@ -209,13 +209,21 @@
         const e = skins[String(skinNid)];
         return (e && e.field_model) ? ('https://ev.io/' + e.field_model) : null;
     }
+    // These `prop` values are sent all the way through to the real client as the AdditionalUserInfo
+    // field name for that weapon's skin (see local_ws_server.js's buildPropRoster, which forwards
+    // this object's keys verbatim as the wire `field`) — they're NOT just an internal convention
+    // between this file and our server, so they have to track the client's own current field
+    // names. Re-matched against ev.io 1-7-1's now-readable getNewAdditionalUserInfo() defaults,
+    // which list exactly these 6 weapon-skin fields in this same order (the old Q-identifiers
+    // below no longer exist in the 1-7-1 bundle at all — this whole mechanism was renamed from
+    // the old obfuscated getPlayerProps/PlayerPropKey system to this one).
     const WEAPON_SKIN_MAP = [
-        { acct: 'field_auto_rifle_skin',  prop: 'Qcdgi7s' },
-        { acct: 'field_hand_cannon_skin', prop: 'Qy8jpjd' },
-        { acct: 'field_laser_rifle_skin', prop: 'Qclpb4q' },
-        { acct: 'field_burst_rifle_skin', prop: 'Qb9vw3f' },
-        { acct: 'field_sweeper_skin',     prop: 'Ql3d4qw' },
-        { acct: 'field_sword_skin',       prop: 'Q53m0bo' },
+        { acct: 'field_auto_rifle_skin',  prop: 'autoRifleSkinUrl' },  // was Qcdgi7s
+        { acct: 'field_hand_cannon_skin', prop: 'handCannonSkinUrl' }, // was Qy8jpjd
+        { acct: 'field_laser_rifle_skin', prop: 'laserRifleSkinUrl' }, // was Qclpb4q
+        { acct: 'field_burst_rifle_skin', prop: 'burstRifleSkinUrl' }, // was Qb9vw3f
+        { acct: 'field_sweeper_skin',     prop: 'sweeperSkinUrl' },    // was Ql3d4qw
+        { acct: 'field_sword_skin',       prop: 'swordSkinUrl' },      // was Q53m0bo
     ];
     function resolveWeaponSkins(acc) {
         const out = {};

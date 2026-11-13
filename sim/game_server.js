@@ -8270,7 +8270,9 @@ function applyLiveLoadout(session, playerState, jsonStr, sessions) {
     if (typeof data[f] === "string" && data[f] && data[f] !== session[f]) { session[f] = data[f]; changed = true; }
   }
   if (data.weaponSkins && typeof data.weaponSkins === "object") {
-    const allowed = new Set(["Qcdgi7s", "Qy8jpjd", "Qclpb4q", "Qb9vw3f", "Ql3d4qw", "Q53m0bo"]);
+    // Allow-list updated to the current (ev.io 1-7-1) AdditionalUserInfo field names — see
+    // buildPropRoster's own comment for why these can't just be an internal convention.
+    const allowed = new Set(["autoRifleSkinUrl", "handCannonSkinUrl", "laserRifleSkinUrl", "burstRifleSkinUrl", "sweeperSkinUrl", "swordSkinUrl"]);
     const ws2 = {};
     for (const [k, v] of Object.entries(data.weaponSkins)) {
       if (allowed.has(k) && typeof v === "string" && v) ws2[k] = v;
@@ -8294,66 +8296,60 @@ function applyLiveLoadout(session, playerState, jsonStr, sessions) {
 }
 
 /**
- * Player-prop roster sync using the CLIENT'S OWN native channel — no userscript
- * shadow store. The client's notification handler (bundle y(), case '3') receives
- * a '~3`<json>' event, clears its getPlayerProps map `g`, and for each roster entry
- * does `g[entityId] ||= createPlayerPropStore(); g[entityId][propKey] = propValue`.
- * So the client builds the FULL default store itself (no partial-store crash) and
- * we only override the fields we know — here SKIN_URL (the body skin), resolved
- * client-side from the account's field_eq_skin and bridged in the join as skinUrl.
+ * Player-cosmetics roster sync using the CLIENT'S OWN native channel — no userscript
+ * shadow store.
  *
- * Wire format (see WS dispatch, case '~'): '~' + code + '`' + JSON. entityId is the
- * player's sessionId (= our playerId, opcode 90), which is the key getPlayerProps uses.
- *
- * CRITICAL — OBFUSCATED FIELD NAMES. The client reads the OBFUSCATED property names,
- * NOT the human-readable deobfuscated ones. Verified against evidence/web/assets/bundle.js:
- *   roster entry: { Qwhkhza:<entityId>, Qcxi0k5:<propKey>, Qcou9jy:<propValue> }
- *   case '3' does: g[s.Qwhkhza] ||= createPlayerPropStore(); g[s.Qwhkhza][s.Qcxi0k5] = s.Qcou9jy
- * The propKey (Qcxi0k5) must be the PlayerPropKey VALUE, also obfuscated:
- *   SKIN_URL -> 'Qh52c4d'  (createPlayerPropStore default: Qh52c4d:'.../default_2.evskin')
- * The renderer reads m.Qh52c4d for the body skin. Using the deobfuscated names
- * ('entityId'/'propKey'/'propValue'/'SKIN_URL') silently no-ops -> g["undefined"].
+ * ev.io 1-7-1 REPLACED this whole mechanism. The old one (getPlayerProps/createPlayerPropStore,
+ * keyed by obfuscated PlayerPropKey values like 'Qh52c4d') is gone entirely from the 1-7-1
+ * bundle. In its place is a now fully-readable "AdditionalUserInfo" system: the client's
+ * notification handler (bundle `_`, case '3') receives a '~3`<json>' event containing an ARRAY
+ * of { user, field, value } tuples, clears its whole per-user info map, and for each tuple does
+ * `v[user] ||= getNewAdditionalUserInfo(); v[user][field] = value`. getNewAdditionalUserInfo()'s
+ * own defaults (readable now) are where the field names below come from, each one confirmed
+ * against its OWN rendering code in the live bundle — e.g. skinTier:
+ *   '<div class="msg_profile_score '+o.skinTier.toLowerCase()+'">'
+ * and clanHomepage, paired with the per-entity clanInsignia image (opcode 235) exactly like the
+ * old Q3ap9pp was paired with Qdqucnz:
+ *   null===e.clanInsignia||null===o.clanHomepage||s||(d='<a href="'+o.clanHomepage+'">
+ *     <img src="'+e.clanInsignia+'"/></a>')
+ * Wire format is unchanged: '~' + code + '`' + JSON. `user` is the player's sessionId (= our
+ * playerId, opcode 90) — same key the old `entityId` was.
  */
-const PROP_KEY_SKIN_URL = "Qh52c4d"; // PlayerPropKey.SKIN_URL (obfuscated value)
-// PlayerPropKey.THUMB_URL — the PROFILE AVATAR shown in the scoreboard AND the kill feed. Both
-// build their image from the SAME helper:
-//   K = function(entity, props, cfg) { var i = props.Qaalbed; ...zombie override...; return i }
-//   scoreboard: '<div class="msg_profile_score …"><img src="' + K(e,o,r) + '">'
-//   kill feed : '<div class="msg_profile …"><img src="' + K(e,l,o) + '" />'
-// so sending this one prop fixes both. It is NOT a user-uploaded picture — it is the equipped
-// SKIN's `field_profile_thumb` (cmsBaseURL + that path), which is why the zombie fallback is also
-// a skin thumb. Scope is Public in the client's field table, i.e. broadcast to everyone.
-const PROP_KEY_THUMB_URL = "Qaalbed";
-// PlayerPropKey rarity — the CSS class on the avatar frame in both views
-// (`msg_profile_score ' + o.Qy58vo2.toLowerCase()`). Without it the frame renders unstyled.
-const PROP_KEY_RARITY = "Qy58vo2";
-// PlayerPropKey clan link — the scoreboard's clan insignia is gated on BOTH this prop and the
-// per-entity clan image (opcode 235):
-//   h = ''; (e.Qdqucnz === null || o.Q3ap9pp === null || s) || (h = '<a href="'+o.Q3ap9pp+'"><img src="'+e.Qdqucnz+'"/></a>')
-// so the logo needs the image (235) AND this URL — either one null and the insignia stays empty.
-const PROP_KEY_CLAN_LINK = "Q3ap9pp";
+const PROP_KEY_SKIN_URL = "skinUrl"; // was Qh52c4d
+// THUMB_URL equivalent — the PROFILE AVATAR shown in the scoreboard AND the kill feed (both
+// build their image from the same helper reading this one field). Not a user-uploaded picture —
+// it's the equipped skin's `field_profile_thumb` (cmsBaseURL + that path), same as before.
+const PROP_KEY_THUMB_URL = "profileURL"; // was Qaalbed
+// skinTier — the CSS class on the avatar frame in both views. Without it the frame renders
+// unstyled. Confirmed above against its own rendering code.
+const PROP_KEY_RARITY = "skinTier"; // was Qy58vo2
+// clanHomepage — the scoreboard's clan insignia is gated on BOTH this and the per-entity clan
+// image (opcode 235, unaffected by this rename) — either one null/missing and the insignia
+// stays empty. Confirmed above against its own rendering code.
+const PROP_KEY_CLAN_LINK = "clanHomepage"; // was Q3ap9pp
 
 function buildPropRoster(sessions) {
   const roster = [];
   for (const s of sessions.values()) {
     if (!s || !s.accepted) continue;
     if (typeof s.skinUrl === "string" && s.skinUrl) {
-      roster.push({ Qwhkhza: s.sessionId, Qcxi0k5: PROP_KEY_SKIN_URL, Qcou9jy: s.skinUrl });
+      roster.push({ user: s.sessionId, field: PROP_KEY_SKIN_URL, value: s.skinUrl });
     }
     if (typeof s.thumbUrl === "string" && s.thumbUrl) {
-      roster.push({ Qwhkhza: s.sessionId, Qcxi0k5: PROP_KEY_THUMB_URL, Qcou9jy: s.thumbUrl });
+      roster.push({ user: s.sessionId, field: PROP_KEY_THUMB_URL, value: s.thumbUrl });
     }
     if (typeof s.skinRarity === "string" && s.skinRarity) {
-      roster.push({ Qwhkhza: s.sessionId, Qcxi0k5: PROP_KEY_RARITY, Qcou9jy: s.skinRarity });
+      roster.push({ user: s.sessionId, field: PROP_KEY_RARITY, value: s.skinRarity });
     }
     if (typeof s.clanLink === "string" && s.clanLink) {
-      roster.push({ Qwhkhza: s.sessionId, Qcxi0k5: PROP_KEY_CLAN_LINK, Qcou9jy: s.clanLink });
+      roster.push({ user: s.sessionId, field: PROP_KEY_CLAN_LINK, value: s.clanLink });
     }
-    // Weapon skins: each key is already the obfuscated getPlayerProps field the renderer
-    // reads for that weapon (the propKey IS the property name set on the store).
+    // Weapon skins: each key is already the AdditionalUserInfo field name the renderer reads
+    // for that weapon (e.g. "autoRifleSkinUrl") — see WEAPON_SKIN_MAP in page-socket-hook.js,
+    // which supplies these keys and was updated to the same new names alongside this file.
     if (s.weaponSkins) {
-      for (const [propKey, url] of Object.entries(s.weaponSkins)) {
-        roster.push({ Qwhkhza: s.sessionId, Qcxi0k5: propKey, Qcou9jy: url });
+      for (const [field, url] of Object.entries(s.weaponSkins)) {
+        roster.push({ user: s.sessionId, field, value: url });
       }
     }
   }
@@ -8369,7 +8365,7 @@ function broadcastProfiles(sessions) {
   // every timed resend — keeps the console readable.
   if (msg !== _lastRosterMsg) {
     const recips = [...sessions.values()].filter(s => s && s.accepted).length;
-    console.log(`[evio-local] ~3 prop-roster -> ${recips} client(s): ${roster.length} skin(s) [${roster.map(r => r.Qwhkhza).join(", ")}]`);
+    console.log(`[evio-local] ~3 cosmetics roster -> ${recips} client(s): ${roster.length} field(s) [${roster.map(r => r.user).join(", ")}]`);
     _lastRosterMsg = msg;
   }
   for (const s of sessions.values()) {
@@ -11298,17 +11294,18 @@ function startServer() {
       skinTargetId: null,
       skinUrl: null,
       // Scoreboard / kill-feed cosmetics, bridged from the account by the userscript.
-      //   thumbUrl   -> prop Qaalbed  (avatar image in BOTH the scoreboard and the kill feed)
-      //   skinRarity -> prop Qy58vo2  (CSS class on the avatar frame)
-      //   clanImgUrl -> opcode 235    (clan insignia image)
-      //   clanLink   -> prop Q3ap9pp  (clan insignia link; the insignia needs BOTH)
+      //   thumbUrl   -> field profileURL    (avatar image in BOTH the scoreboard and the kill feed)
+      //   skinRarity -> field skinTier      (CSS class on the avatar frame)
+      //   clanImgUrl -> opcode 235          (clan insignia image)
+      //   clanLink   -> field clanHomepage  (clan insignia link; the insignia needs BOTH)
       thumbUrl: null,
       skinRarity: null,
       clanImgUrl: null,
       clanLink: null,
-      // Equipped weapon-skin model URLs, keyed by the OBFUSCATED getPlayerProps field the
-      // renderer reads per weapon (Qcdgi7s/Qy8jpjd/Qclpb4q/Qb9vw3f/Ql3d4qw/Q53m0bo). Resolved
-      // client-side (account field_<weapon>_skin -> catalogue field_model) and relayed via '~3'.
+      // Equipped weapon-skin model URLs, keyed by the AdditionalUserInfo field the renderer
+      // reads per weapon (autoRifleSkinUrl/handCannonSkinUrl/laserRifleSkinUrl/
+      // burstRifleSkinUrl/sweeperSkinUrl/swordSkinUrl). Resolved client-side (account
+      // field_<weapon>_skin -> catalogue field_model) and relayed via '~3'.
       weaponSkins: null,
       // Ability loadout array (weaponStateArray / field_abilities_loadout). Bridged from
       // the join; drives the computed weaponStats (jump/sprint/teleport/switch/reload) and
@@ -11566,8 +11563,9 @@ function startServer() {
             if (join && typeof join.clanImgUrl === "string" && join.clanImgUrl) session.clanImgUrl = _boundedUrl(join.clanImgUrl);
             if (join && typeof join.clanLink === "string" && join.clanLink) session.clanLink = join.clanLink;
             if (join && join.weaponSkins && typeof join.weaponSkins === "object") {
-              // Keep only string URL values keyed by the known obfuscated prop fields.
-              const allowed = new Set(["Qcdgi7s", "Qy8jpjd", "Qclpb4q", "Qb9vw3f", "Ql3d4qw", "Q53m0bo"]);
+              // Keep only string URL values keyed by the known AdditionalUserInfo fields (see
+              // buildPropRoster's own comment — these are the current, ev.io 1-7-1 names).
+              const allowed = new Set(["autoRifleSkinUrl", "handCannonSkinUrl", "laserRifleSkinUrl", "burstRifleSkinUrl", "sweeperSkinUrl", "swordSkinUrl"]);
               const ws2 = {};
               for (const [k, v] of Object.entries(join.weaponSkins)) {
                 if (allowed.has(k) && typeof v === "string" && v) ws2[k] = v;
@@ -11594,7 +11592,7 @@ function startServer() {
               displayName: session.displayName,
               uid: session.uid,
               // Opcode 235 — the clan insignia IMAGE. The scoreboard renders the insignia only
-              // when this AND the Q3ap9pp clan-link prop are both non-null.
+              // when this AND the clanHomepage field (see buildPropRoster) are both non-null.
               clan: session.clanImgUrl,
               weaponId: session.weaponId,
               abilitySeed: session.abilitySeed,   // opcode 93 + drives computed weaponStats

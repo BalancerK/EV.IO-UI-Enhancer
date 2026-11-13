@@ -28314,7 +28314,7 @@ var EvioSim = (() => {
       }
     }
     if (data.weaponSkins && typeof data.weaponSkins === "object") {
-      const allowed = /* @__PURE__ */ new Set(["Qcdgi7s", "Qy8jpjd", "Qclpb4q", "Qb9vw3f", "Ql3d4qw", "Q53m0bo"]);
+      const allowed = /* @__PURE__ */ new Set(["autoRifleSkinUrl", "handCannonSkinUrl", "laserRifleSkinUrl", "burstRifleSkinUrl", "sweeperSkinUrl", "swordSkinUrl"]);
       const ws2 = {};
       for (const [k2, v2] of Object.entries(data.weaponSkins)) {
         if (allowed.has(k2) && typeof v2 === "string" && v2) ws2[k2] = v2;
@@ -28329,29 +28329,29 @@ var EvioSim = (() => {
     const drain = playerState._ps && playerState._ps.Qz8l93a ? playerState._ps.Qz8l93a.Qbypopp : "?";
     console.log(`[evio-local] LIVE loadout: weapon=${session.weaponId} array=[${(session.abilitySeed || []).join(",")}] staminaDrain=${drain} skinUrl=${session.skinUrl ? "set" : "default"}`);
   }
-  var PROP_KEY_SKIN_URL = "Qh52c4d";
-  var PROP_KEY_THUMB_URL = "Qaalbed";
-  var PROP_KEY_RARITY = "Qy58vo2";
-  var PROP_KEY_CLAN_LINK = "Q3ap9pp";
+  var PROP_KEY_SKIN_URL = "skinUrl";
+  var PROP_KEY_THUMB_URL = "profileURL";
+  var PROP_KEY_RARITY = "skinTier";
+  var PROP_KEY_CLAN_LINK = "clanHomepage";
   function buildPropRoster(sessions) {
     const roster = [];
     for (const s2 of sessions.values()) {
       if (!s2 || !s2.accepted) continue;
       if (typeof s2.skinUrl === "string" && s2.skinUrl) {
-        roster.push({ Qwhkhza: s2.sessionId, Qcxi0k5: PROP_KEY_SKIN_URL, Qcou9jy: s2.skinUrl });
+        roster.push({ user: s2.sessionId, field: PROP_KEY_SKIN_URL, value: s2.skinUrl });
       }
       if (typeof s2.thumbUrl === "string" && s2.thumbUrl) {
-        roster.push({ Qwhkhza: s2.sessionId, Qcxi0k5: PROP_KEY_THUMB_URL, Qcou9jy: s2.thumbUrl });
+        roster.push({ user: s2.sessionId, field: PROP_KEY_THUMB_URL, value: s2.thumbUrl });
       }
       if (typeof s2.skinRarity === "string" && s2.skinRarity) {
-        roster.push({ Qwhkhza: s2.sessionId, Qcxi0k5: PROP_KEY_RARITY, Qcou9jy: s2.skinRarity });
+        roster.push({ user: s2.sessionId, field: PROP_KEY_RARITY, value: s2.skinRarity });
       }
       if (typeof s2.clanLink === "string" && s2.clanLink) {
-        roster.push({ Qwhkhza: s2.sessionId, Qcxi0k5: PROP_KEY_CLAN_LINK, Qcou9jy: s2.clanLink });
+        roster.push({ user: s2.sessionId, field: PROP_KEY_CLAN_LINK, value: s2.clanLink });
       }
       if (s2.weaponSkins) {
-        for (const [propKey, url] of Object.entries(s2.weaponSkins)) {
-          roster.push({ Qwhkhza: s2.sessionId, Qcxi0k5: propKey, Qcou9jy: url });
+        for (const [field, url] of Object.entries(s2.weaponSkins)) {
+          roster.push({ user: s2.sessionId, field, value: url });
         }
       }
     }
@@ -28364,7 +28364,7 @@ var EvioSim = (() => {
     const msg = "~3`" + JSON.stringify(roster);
     if (msg !== _lastRosterMsg) {
       const recips = [...sessions.values()].filter((s2) => s2 && s2.accepted).length;
-      console.log(`[evio-local] ~3 prop-roster -> ${recips} client(s): ${roster.length} skin(s) [${roster.map((r2) => r2.Qwhkhza).join(", ")}]`);
+      console.log(`[evio-local] ~3 cosmetics roster -> ${recips} client(s): ${roster.length} field(s) [${roster.map((r2) => r2.user).join(", ")}]`);
       _lastRosterMsg = msg;
     }
     for (const s2 of sessions.values()) {
@@ -30603,17 +30603,18 @@ var EvioSim = (() => {
         skinTargetId: null,
         skinUrl: null,
         // Scoreboard / kill-feed cosmetics, bridged from the account by the userscript.
-        //   thumbUrl   -> prop Qaalbed  (avatar image in BOTH the scoreboard and the kill feed)
-        //   skinRarity -> prop Qy58vo2  (CSS class on the avatar frame)
-        //   clanImgUrl -> opcode 235    (clan insignia image)
-        //   clanLink   -> prop Q3ap9pp  (clan insignia link; the insignia needs BOTH)
+        //   thumbUrl   -> field profileURL    (avatar image in BOTH the scoreboard and the kill feed)
+        //   skinRarity -> field skinTier      (CSS class on the avatar frame)
+        //   clanImgUrl -> opcode 235          (clan insignia image)
+        //   clanLink   -> field clanHomepage  (clan insignia link; the insignia needs BOTH)
         thumbUrl: null,
         skinRarity: null,
         clanImgUrl: null,
         clanLink: null,
-        // Equipped weapon-skin model URLs, keyed by the OBFUSCATED getPlayerProps field the
-        // renderer reads per weapon (Qcdgi7s/Qy8jpjd/Qclpb4q/Qb9vw3f/Ql3d4qw/Q53m0bo). Resolved
-        // client-side (account field_<weapon>_skin -> catalogue field_model) and relayed via '~3'.
+        // Equipped weapon-skin model URLs, keyed by the AdditionalUserInfo field the renderer
+        // reads per weapon (autoRifleSkinUrl/handCannonSkinUrl/laserRifleSkinUrl/
+        // burstRifleSkinUrl/sweeperSkinUrl/swordSkinUrl). Resolved client-side (account
+        // field_<weapon>_skin -> catalogue field_model) and relayed via '~3'.
         weaponSkins: null,
         // Ability loadout array (weaponStateArray / field_abilities_loadout). Bridged from
         // the join; drives the computed weaponStats (jump/sprint/teleport/switch/reload) and
@@ -30791,7 +30792,7 @@ var EvioSim = (() => {
               if (join && typeof join.clanImgUrl === "string" && join.clanImgUrl) session.clanImgUrl = _boundedUrl(join.clanImgUrl);
               if (join && typeof join.clanLink === "string" && join.clanLink) session.clanLink = join.clanLink;
               if (join && join.weaponSkins && typeof join.weaponSkins === "object") {
-                const allowed = /* @__PURE__ */ new Set(["Qcdgi7s", "Qy8jpjd", "Qclpb4q", "Qb9vw3f", "Ql3d4qw", "Q53m0bo"]);
+                const allowed = /* @__PURE__ */ new Set(["autoRifleSkinUrl", "handCannonSkinUrl", "laserRifleSkinUrl", "burstRifleSkinUrl", "sweeperSkinUrl", "swordSkinUrl"]);
                 const ws22 = {};
                 for (const [k2, v2] of Object.entries(join.weaponSkins)) {
                   if (allowed.has(k2) && typeof v2 === "string" && v2) ws22[k2] = v2;
@@ -30818,7 +30819,7 @@ var EvioSim = (() => {
                 displayName: session.displayName,
                 uid: session.uid,
                 // Opcode 235 — the clan insignia IMAGE. The scoreboard renders the insignia only
-                // when this AND the Q3ap9pp clan-link prop are both non-null.
+                // when this AND the clanHomepage field (see buildPropRoster) are both non-null.
                 clan: session.clanImgUrl,
                 weaponId: session.weaponId,
                 abilitySeed: session.abilitySeed,
