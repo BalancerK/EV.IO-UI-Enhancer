@@ -589,13 +589,15 @@
             // `disabled` nor `dontAllowPublicGames` — 6 of the 19. Choosing an entry just calls
             // findAndConnectToPublicGame for that mode id, the same request ?game_mode=<id> makes,
             // and the matchmaker does run at least some of the unlisted ones (a public `swords`
-            // room was seen live). So list the other 13 too, under a divider, each tagged with its
-            // mode id: several share a display name with a listed mode ("Deathmatch",
-            // "Survival", "Team Deathmatch", "Last Team Standing" x2). The menu itself is
+            // room was seen live). So add the unlisted modes under an "Additional gamemodes"
+            // divider — except the five that are just a variant of a mode already in the menu
+            // (same display name): deathmatch, deathmatch_fractal_earn, team_deathmatch_earn,
+            // survival and last_team_standing (last_team_standing_earn is kept as the one Last
+            // Team Standing entry). That leaves 8, all with distinct names. The menu itself is
             // desktop-only, so the dropped mobile filter never applied here anyway.
-            name: 'GM1 list all 19 game modes in the Public Game menu',
+            name: 'GM1 add the unlisted game modes to the Public Game menu',
             from: "var o=Id.gameModes[t];o.disabled||o.dontAllowPublicGames||(Vx.Mobile.DETECTED&&o.allowMobile||!Vx.Mobile.DETECTED)&&(e+='<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option\"><a href=\"#\">'+(0,kd.translateText)(o.name)+'</a></li>')}e+='</ul></span></div>'",
-            to:   "var o=Id.gameModes[t];(o.disabled||o.dontAllowPublicGames)?(window.__EVIO_EXT_MORE_MODES__=(window.__EVIO_EXT_MORE_MODES__||'')+'<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option evio-more-mode\"><a href=\"#\">'+(0,kd.translateText)(o.name)+' <small class=\"evio-mode-id\">'+t+'</small></a></li>'):(Vx.Mobile.DETECTED&&o.allowMobile||!Vx.Mobile.DETECTED)&&(e+='<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option\"><a href=\"#\">'+(0,kd.translateText)(o.name)+'</a></li>')}window.__EVIO_EXT_MORE_MODES__&&(e+='<li role=\"separator\" class=\"divider\"></li><li class=\"dropdown-header evio-more-header\">Not in the official menu</li>'+window.__EVIO_EXT_MORE_MODES__),window.__EVIO_EXT_MORE_MODES__='',e+='</ul></span></div>'",
+            to:   "var o=Id.gameModes[t];(o.disabled||o.dontAllowPublicGames)?(/^(deathmatch|deathmatch_fractal_earn|team_deathmatch_earn|survival|last_team_standing)$/.test(t)||(window.__EVIO_EXT_MORE_MODES__=(window.__EVIO_EXT_MORE_MODES__||'')+'<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option evio-more-mode\"><a href=\"#\">'+(0,kd.translateText)(o.name)+'</a></li>')):(Vx.Mobile.DETECTED&&o.allowMobile||!Vx.Mobile.DETECTED)&&(e+='<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option\"><a href=\"#\">'+(0,kd.translateText)(o.name)+'</a></li>')}window.__EVIO_EXT_MORE_MODES__&&(e+='<li role=\"separator\" class=\"divider\"></li><li class=\"dropdown-header evio-more-header\">Additional gamemodes</li>'+window.__EVIO_EXT_MORE_MODES__),window.__EVIO_EXT_MORE_MODES__='',e+='</ul></span></div>'",
         },
     ];
 
