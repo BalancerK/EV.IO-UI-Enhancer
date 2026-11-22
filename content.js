@@ -591,6 +591,20 @@ window.addEventListener('load', () => {
 #ev-priv-dropdown-wrapper:hover .dropdown-menu {
     display: block;
 }
+/* Public Game menu: the 13 modes the official menu hides (added by page-socket-hook.js GM1).
+   The menu can be long now, so let it scroll instead of running off the screen. */
+#game_mode_menu .dropdown-menu {
+    max-height: 75vh;
+    overflow-y: auto;
+}
+#game_mode_menu .evio-more-header {
+    opacity: 0.7;
+}
+#game_mode_menu .evio-mode-id {
+    opacity: 0.55;
+    font-size: 0.8em;
+    margin-left: 4px;
+}
     `);
 
     // ----------------- global state -----------------

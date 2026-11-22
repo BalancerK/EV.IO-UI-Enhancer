@@ -584,6 +584,19 @@
             from: "u.push({id:f+':'+h+':'+i,eventAge:0,ownerId:h,origin:l.clone(),direction:y,",
             to:   "(window.__EVIO_EXT_SHOTRAY__&&window.__EVIO_EXT_SHOTRAY__(l,y,f+':'+h+':'+i)),u.push({id:f+':'+h+':'+i,eventAge:0,ownerId:h,origin:l.clone(),direction:y,",
         },
+        {
+            // The Public Game menu (addGameModesInterface) lists only modes that are neither
+            // `disabled` nor `dontAllowPublicGames` — 6 of the 19. Choosing an entry just calls
+            // findAndConnectToPublicGame for that mode id, the same request ?game_mode=<id> makes,
+            // and the matchmaker does run at least some of the unlisted ones (a public `swords`
+            // room was seen live). So list the other 13 too, under a divider, each tagged with its
+            // mode id: several share a display name with a listed mode ("Deathmatch",
+            // "Survival", "Team Deathmatch", "Last Team Standing" x2). The menu itself is
+            // desktop-only, so the dropped mobile filter never applied here anyway.
+            name: 'GM1 list all 19 game modes in the Public Game menu',
+            from: "var o=Id.gameModes[t];o.disabled||o.dontAllowPublicGames||(Vx.Mobile.DETECTED&&o.allowMobile||!Vx.Mobile.DETECTED)&&(e+='<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option\"><a href=\"#\">'+(0,kd.translateText)(o.name)+'</a></li>')}e+='</ul></span></div>'",
+            to:   "var o=Id.gameModes[t];(o.disabled||o.dontAllowPublicGames)?(window.__EVIO_EXT_MORE_MODES__=(window.__EVIO_EXT_MORE_MODES__||'')+'<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option evio-more-mode\"><a href=\"#\">'+(0,kd.translateText)(o.name)+' <small class=\"evio-mode-id\">'+t+'</small></a></li>'):(Vx.Mobile.DETECTED&&o.allowMobile||!Vx.Mobile.DETECTED)&&(e+='<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option\"><a href=\"#\">'+(0,kd.translateText)(o.name)+'</a></li>')}window.__EVIO_EXT_MORE_MODES__&&(e+='<li role=\"separator\" class=\"divider\"></li><li class=\"dropdown-header evio-more-header\">Not in the official menu</li>'+window.__EVIO_EXT_MORE_MODES__),window.__EVIO_EXT_MORE_MODES__='',e+='</ul></span></div>'",
+        },
     ];
 
     function isBundle(v) { return typeof v === 'string' && v.indexOf('bundle.js') !== -1; }
