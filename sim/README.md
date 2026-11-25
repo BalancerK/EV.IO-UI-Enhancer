@@ -34,6 +34,10 @@ have no browser equivalent are handled two ways:
   browser's Cache Storage API (`caches.open`/`.match`/`.put`) in place of the Node server's disk
   cache; everything else (fetch, parse, build the physics world, resolve spawns) is identical.
   Switching maps works mid-session via the admin panel's map dropdown, same as the Node server.
+  Community maps uploaded to ev.io after the `maps.json` snapshot come from the hosted list
+  <https://balancerk.github.io/EV.IO-MAP-EDITOR/maps/extra-maps.json> (fetched when the game
+  server boots, last good copy kept in Cache Storage) — the same list the Node server merges — so
+  adding a map there needs no rebuild of this bundle and no Web Store release.
 - `weapons.json` is bundled directly via esbuild's built-in JSON loader (`import cachedWeaponsData
   from "./weapons.json"`) instead of read from disk at runtime.
 

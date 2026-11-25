@@ -12187,7 +12187,9 @@ function bootServer() {
   // "physics world ready" log), and per-microtask ordering the SECOND one attached can run before
   // this chain's own .then(loadStartupMap) continuation reaches startServer(). Awaiting this
   // specific promise instead is the only correct way to know _live.handleConnection exists yet.
+  // Load the hosted extra-maps list before resolving the startup map, so a map from it is found.
   _live.readyPromise = bpw.ready
+    .then(() => mapLoader.refreshExtraMaps())
     .then(loadStartupMap)
     .then(() => {
       console.log("[evio-local] extracted physics world ready — starting server");

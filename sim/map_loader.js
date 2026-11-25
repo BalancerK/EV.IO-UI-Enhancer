@@ -28,7 +28,85 @@ const WORLD_CACHE_MAX = 3;
 
 let _catalogue = null;
 
+// ── Hosted extra-maps list ─────────────────────────────────────────────────────────────────────
+// Same list, same rules as the Node server's extra_maps.js: community maps uploaded to ev.io after
+// the maps.json snapshot are listed in one hosted file (maintained in the EV.IO-MAP-EDITOR repo),
+// fetched when the game server boots and merged into the catalogue — so a new map needs no bundle
+// rebuild and no Web Store release. The last good copy is kept in Cache Storage so it still works
+// offline. Only .evmap files on ev.io's own file store are accepted, because the list decides what
+// players' browsers download.
+const EXTRA_MAPS_URL = 'https://balancerk.github.io/EV.IO-MAP-EDITOR/maps/extra-maps.json';
+const EXTRA_CACHE_KEY = 'https://evio-ext.invalid/extra-maps.json';
+const EVMAP_URL_RE = /^https:\/\/ev\.io\/sites\/default\/files\/maps\/[A-Za-z0-9._%-]+\.evmap$/;
+const IMAGE_URL_RE = /^https:\/\/ev\.io\/sites\/default\/files\/[A-Za-z0-9._%\/-]+\.(png|jpe?g)$/i;
+let _extra = [];
+let _merged = null;
+
+function parseExtraList(raw) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.maps)) throw new Error('not an extra-maps list');
+  const out = [];
+  const seen = new Set();
+  for (const m of raw.maps.slice(0, 500)) {
+    if (!m || typeof m !== 'object') continue;
+    const nid = Number(m.nid);
+    if (!Number.isInteger(nid) || nid <= 0 || seen.has(nid)) continue;
+    if (typeof m.evmapUrl !== 'string' || !EVMAP_URL_RE.test(m.evmapUrl)) continue;
+    const img = (u) => (typeof u === 'string' && IMAGE_URL_RE.test(u) ? u : null);
+    seen.add(nid);
+    out.push({
+      nid,
+      title: (typeof m.title === 'string' && m.title.trim() ? m.title.trim() : `Map ${nid}`).slice(0, 80),
+      evmapUrl: m.evmapUrl,
+      thumbUrl: img(m.thumbUrl),
+      largeImageUrl: img(m.largeImageUrl),
+      inRotation: false,
+      extra: true,
+    });
+  }
+  return out;
+}
+
+/**
+ * Load the extra-maps list: the cached copy first (instant, offline-safe), then the hosted file.
+ * Never rejects; resolves to the number of extra maps known afterwards.
+ */
+async function refreshExtraMaps() {
+  let cache = null;
+  try { cache = await caches.open(CACHE_NAME); } catch { /* no Cache Storage: fetch only */ }
+  if (cache && !_extra.length) {
+    try {
+      const hit = await cache.match(EXTRA_CACHE_KEY);
+      if (hit) { _extra = parseExtraList(await hit.json()); _merged = null; }
+    } catch { /* bad cached copy: ignore */ }
+  }
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    const res = await fetch(EXTRA_MAPS_URL, { cache: 'no-cache', signal: ctrl.signal }).finally(() => clearTimeout(timer));
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const raw = await res.json();
+    _extra = parseExtraList(raw);
+    _merged = null;
+    if (cache) {
+      await cache.put(EXTRA_CACHE_KEY, new Response(JSON.stringify(raw), { headers: { 'content-type': 'application/json' } }));
+    }
+    console.log(`[evio-ext] map-loader: ${_extra.length} extra map(s) from the hosted list`);
+  } catch (err) {
+    console.warn(`[evio-ext] map-loader: extra-maps list unavailable (${err && err.message}); using ${_extra.length} cached`);
+  }
+  return _extra.length;
+}
+
+// The official snapshot plus the extra list; an extra entry replaces a snapshot one with the same nid.
 function listMaps() {
+  if (_merged) return _merged;
+  const extraIds = new Set(_extra.map((m) => String(m.nid)));
+  _merged = baseCatalogue().filter((m) => !extraIds.has(String(m.nid))).concat(_extra)
+    .sort((x, y) => String(x.title).localeCompare(String(y.title)));
+  return _merged;
+}
+
+function baseCatalogue() {
   if (_catalogue) return _catalogue;
   const raw = mapsJsonData;
   const byId = new Map();
@@ -130,4 +208,4 @@ async function cachedMaps() {
   return listMaps().filter((m) => cachedUrls.has(m.evmapUrl));
 }
 
-export { listMaps, findMap, loadMap, fetchEvmap, cachedMaps };
+export { listMaps, findMap, loadMap, fetchEvmap, cachedMaps, refreshExtraMaps, parseExtraList };
