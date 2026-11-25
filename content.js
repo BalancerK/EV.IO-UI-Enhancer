@@ -145,15 +145,25 @@ window.addEventListener('load', () => {
         survival_earn: 'Survival (Earn)',
         infection: 'Infection',
         last_man_standing: 'Last Man Standing',
-        sniper_shotgun: 'Sniper Shotgun'
+        sniper_shotgun: 'Sniper Shotgun',
+        deathmatch_fractal_earn: 'Deathmatch (Fractal)',
+        social: 'Social',
+        instagib: 'Instagib',
+        swords: 'Swords',
+        mayhem: 'Mayhem',
+        snipe_the_streamer: 'Snipe the Streamer',
+        last_team_standing: 'Last Team Standing',
+        last_team_standing_earn: 'Last Team Standing (Earn)',
+        search_and_destroy: 'Search and Destroy',
+        capture_the_flag: 'Capture the Flag'
     };
 
     const REGION_NAMES = {
-        fra: 'FRA',
-        sin: 'SIN',
-        gru: 'GRU',
-        atl: 'ATL',
-        lax: 'LAX'
+        fra: 'Europe',
+        sin: 'Asia',
+        gru: 'South America',
+        atl: 'NA East',
+        lax: 'NA West'
     };
 
     function prettyGamemode(code) {
