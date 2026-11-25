@@ -385,12 +385,6 @@ window.addEventListener('load', () => {
     overflow: hidden;
     text-overflow: ellipsis;
 }
-#ev-players-card .ev-pc-meta {
-    font-size: 12px;
-    opacity: 0.6;
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-}
 #ev-players-card .ev-pc-note {
     padding: 10px 12px;
     opacity: 0.7;
@@ -1968,8 +1962,6 @@ window.addEventListener('load', () => {
                 name: after(210),
                 bot: after(237) === true,
                 joinState: seg[4] === 91 ? seg[5] : undefined,
-                kills: after(214),
-                score: after(216),
             };
         }
     }
@@ -1999,15 +1991,13 @@ window.addEventListener('load', () => {
                     playing: list.filter((p) => !p.bot && p.joinState !== 0).length,
                     waiting: list.filter((p) => !p.bot && p.joinState === 0).length,
                     bots: list.filter((p) => p.bot).length,
-                    // Humans for the hover card: playing first, then by score.
+                    // Humans for the hover card: playing first, then by name.
                     humans: list.filter((p) => !p.bot)
                         .map((p) => ({
                             name: typeof p.name === 'string' && p.name ? p.name : 'Unknown',
                             playing: p.joinState !== 0,
-                            kills: Number.isFinite(p.kills) ? p.kills : 0,
-                            score: Number.isFinite(p.score) ? p.score : 0,
                         }))
-                        .sort((a, b) => (b.playing - a.playing) || (b.score - a.score)),
+                        .sort((a, b) => (b.playing - a.playing) || a.name.localeCompare(b.name)),
                 });
             };
             const hardTimer = setTimeout(() => finish(stayTimer ? null : new Error('timed out')), PROBE_TIMEOUT_MS);
@@ -2182,12 +2172,8 @@ window.addEventListener('load', () => {
                 const name = document.createElement('span');
                 name.className = 'ev-pc-name';
                 name.textContent = p.name;   // textContent: player names are untrusted
-                const meta = document.createElement('span');
-                meta.className = 'ev-pc-meta';
-                meta.textContent = p.playing ? `${p.kills} K · ${p.score}` : 'watching';
                 li.appendChild(dot);
                 li.appendChild(name);
-                li.appendChild(meta);
                 list.appendChild(li);
             });
             card.appendChild(list);
