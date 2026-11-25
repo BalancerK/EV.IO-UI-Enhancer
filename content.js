@@ -1762,12 +1762,13 @@ window.addEventListener('load', () => {
     // This content script runs in the isolated world, so page-socket-hook's WebSocket patch never
     // sees these sockets.
     const PROBE_TTL_MS = 60000;      // reuse a room's count for this long
-    const PROBE_STAY_MS = 1000;      // how long to stay after the join is accepted
+    // The first state packet after the join is the full bootstrap and lists every player, so the
+    // probe leaves as soon as it arrives. PROBE_STAY_MS is only the fallback for a room that sends
+    // no player entities at all. Every room is probed at once (they share one host per region).
+    const PROBE_STAY_MS = 800;
     const PROBE_TIMEOUT_MS = 6000;
-    const PROBE_PARALLEL = 3;
     const PLAYER_COUNTS = {};        // room id -> { state: 'loading'|'ok'|'error', at, playing, waiting, bots, names, error }
     let probeQueue = [];
-    let probesRunning = 0;
 
     function msgpackDecode(buf) {
         const view = new DataView(buf);
@@ -1862,10 +1863,11 @@ window.addEventListener('load', () => {
                 delete players[clientId];   // never count the probe itself
                 const list = Object.values(players);
                 resolve({
+                    players: list.filter((p) => !p.bot).length,
                     playing: list.filter((p) => !p.bot && p.joinState !== 0).length,
                     waiting: list.filter((p) => !p.bot && p.joinState === 0).length,
                     bots: list.filter((p) => p.bot).length,
-                    names: list.filter((p) => !p.bot && p.joinState !== 0).map((p) => p.name).filter(Boolean),
+                    names: list.filter((p) => !p.bot).map((p) => p.name).filter(Boolean),
                 });
             };
             const hardTimer = setTimeout(() => finish(stayTimer ? null : new Error('timed out')), PROBE_TIMEOUT_MS);
@@ -1890,23 +1892,23 @@ window.addEventListener('load', () => {
                 }
                 try {
                     const packet = msgpackDecode(ev.data);
-                    if (Array.isArray(packet) && Array.isArray(packet[2])) collectPlayers(packet[2], players);
+                    if (Array.isArray(packet) && Array.isArray(packet[2])) {
+                        collectPlayers(packet[2], players);
+                        if (stayTimer && Object.keys(players).length) finish(null);
+                    }
                 } catch (e) { /* skip a packet we can't decode */ }
             };
         });
     }
 
     function pumpProbeQueue() {
-        while (probesRunning < PROBE_PARALLEL && probeQueue.length) {
+        while (probeQueue.length) {
             const room = probeQueue.shift();
-            probesRunning++;
             probeLobby(room)
                 .then((r) => { PLAYER_COUNTS[room.id] = { state: 'ok', at: Date.now(), ...r }; })
                 .catch((e) => { PLAYER_COUNTS[room.id] = { state: 'error', at: Date.now(), error: e.message }; })
                 .finally(() => {
-                    probesRunning--;
                     updatePlayerCountCell(room.id);
-                    pumpProbeQueue();
                 });
         }
     }
@@ -1935,7 +1937,7 @@ window.addEventListener('load', () => {
 
     function fillPlayerCount(el, c) {
         el.classList.remove('busy', 'empty', 'pending');
-        if (!c || (c.state === 'loading' && c.playing === undefined)) {
+        if (!c || (c.state === 'loading' && c.players === undefined)) {
             el.textContent = '… players';
             el.classList.add('pending');
             el.title = 'Counting players';
@@ -1947,11 +1949,12 @@ window.addEventListener('load', () => {
             el.title = 'Could not count players: ' + c.error;
             return;
         }
-        el.textContent = `${c.playing} playing`;
-        el.classList.add(c.playing > 0 ? 'busy' : 'empty');
+        // Players = every human in the room, including those still on the click-to-play screen.
+        el.textContent = `${c.players} player${c.players === 1 ? '' : 's'}`;
+        el.classList.add(c.players > 0 ? 'busy' : 'empty');
         const lines = [];
         if (c.names && c.names.length) lines.push(c.names.join(', '));
-        if (c.waiting) lines.push(`${c.waiting} on the click-to-play screen`);
+        lines.push(`${c.playing} playing` + (c.waiting ? `, ${c.waiting} watching` : ''));
         lines.push(`${c.bots} bot${c.bots === 1 ? '' : 's'}`);
         el.title = lines.join('\n');
     }
