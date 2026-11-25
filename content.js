@@ -272,6 +272,135 @@ window.addEventListener('load', () => {
 .ev-lobby-players.pending {
     opacity: 0.6;
 }
+.ev-lobby-players {
+    cursor: default;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+.ev-lobby-players:hover {
+    background: rgba(255,255,255,0.1);
+}
+
+#ev-players-card {
+    position: fixed;
+    z-index: 2147483000;
+    width: 280px;
+    max-height: 60vh;
+    display: none;
+    flex-direction: column;
+    background: rgba(14, 17, 24, 0.97);
+    color: #e8ecf2;
+    border: 1px solid rgba(255,255,255,0.14);
+    border-radius: 8px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.55);
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.35;
+    pointer-events: none;
+    overflow: hidden;
+}
+#ev-players-card.open {
+    display: flex;
+    animation: ev-pc-in 90ms ease-out;
+}
+@keyframes ev-pc-in {
+    from { opacity: 0; transform: translateY(-3px); }
+    to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+    #ev-players-card.open { animation: none; }
+}
+#ev-players-card .ev-pc-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 10px;
+    padding: 10px 12px 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+#ev-players-card .ev-pc-title {
+    font-weight: 700;
+    font-size: 15px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#ev-players-card .ev-pc-region {
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.6;
+    white-space: nowrap;
+}
+#ev-players-card .ev-pc-summary {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    padding: 8px 6px;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+}
+#ev-players-card .ev-pc-stat {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+#ev-players-card .ev-pc-stat-value {
+    font-size: 18px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+#ev-players-card .ev-pc-stat-label {
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.55;
+}
+#ev-players-card .ev-pc-stat.playing .ev-pc-stat-value { color: #7dff7d; }
+#ev-players-card .ev-pc-stat.watching .ev-pc-stat-value { color: #ffcf4d; }
+#ev-players-card .ev-pc-stat.bots .ev-pc-stat-value { opacity: 0.7; }
+#ev-players-card .ev-pc-list {
+    list-style: none;
+    margin: 0;
+    padding: 4px 0;
+    overflow-y: auto;
+}
+#ev-players-card .ev-pc-list li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 12px;
+}
+#ev-players-card .ev-pc-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #7dff7d;
+}
+#ev-players-card li.watching .ev-pc-dot { background: #ffcf4d; }
+#ev-players-card li.watching .ev-pc-name { opacity: 0.7; }
+#ev-players-card .ev-pc-name {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+#ev-players-card .ev-pc-meta {
+    font-size: 12px;
+    opacity: 0.6;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+#ev-players-card .ev-pc-note {
+    padding: 10px 12px;
+    opacity: 0.7;
+}
+#ev-players-card .ev-pc-foot {
+    padding: 6px 12px 8px;
+    font-size: 11px;
+    opacity: 0.45;
+    border-top: 1px solid rgba(255,255,255,0.08);
+}
 .ev-lobby-latency.full {
     color: #ff6969;
 }
@@ -1677,6 +1806,7 @@ window.addEventListener('load', () => {
     function renderLobbyList() {
     const list = document.getElementById('ev-lobbies-list');
     if (!list) return;
+    hidePlayersCard();   // its anchor badge is about to be replaced
     list.innerHTML = '';
 
     if (!Array.isArray(LOBBIES) || !LOBBIES.length) {
@@ -1728,7 +1858,7 @@ window.addEventListener('load', () => {
 
         const right = document.createElement('div');
         right.className = 'ev-lobby-right';
-        right.appendChild(renderPlayerCount(lobby.id));
+        right.appendChild(renderPlayerCount(lobby.id, lobby));
         right.appendChild(latency);
 
         main.appendChild(name);
@@ -1838,6 +1968,8 @@ window.addEventListener('load', () => {
                 name: after(210),
                 bot: after(237) === true,
                 joinState: seg[4] === 91 ? seg[5] : undefined,
+                kills: after(214),
+                score: after(216),
             };
         }
     }
@@ -1867,7 +1999,15 @@ window.addEventListener('load', () => {
                     playing: list.filter((p) => !p.bot && p.joinState !== 0).length,
                     waiting: list.filter((p) => !p.bot && p.joinState === 0).length,
                     bots: list.filter((p) => p.bot).length,
-                    names: list.filter((p) => !p.bot).map((p) => p.name).filter(Boolean),
+                    // Humans for the hover card: playing first, then by score.
+                    humans: list.filter((p) => !p.bot)
+                        .map((p) => ({
+                            name: typeof p.name === 'string' && p.name ? p.name : 'Unknown',
+                            playing: p.joinState !== 0,
+                            kills: Number.isFinite(p.kills) ? p.kills : 0,
+                            score: Number.isFinite(p.score) ? p.score : 0,
+                        }))
+                        .sort((a, b) => (b.playing - a.playing) || (b.score - a.score)),
                 });
             };
             const hardTimer = setTimeout(() => finish(stayTimer ? null : new Error('timed out')), PROBE_TIMEOUT_MS);
@@ -1927,12 +2067,137 @@ window.addEventListener('load', () => {
         pumpProbeQueue();
     }
 
-    function renderPlayerCount(roomId) {
+    function renderPlayerCount(roomId, lobby) {
         const el = document.createElement('div');
         el.className = 'ev-lobby-players';
         el.dataset.roomId = roomId;
         fillPlayerCount(el, PLAYER_COUNTS[roomId]);
+        el.addEventListener('mouseenter', () => showPlayersCard(el, lobby));
+        el.addEventListener('mouseleave', hidePlayersCard);
         return el;
+    }
+
+    // ----- hover card: who is in the room -----
+    // One shared floating card, shown on mouseenter with no delay (the native title tooltip waits
+    // 1-2 s) and refilled live if the room's probe finishes while it is open.
+    let playersCard = null;
+    let playersCardAnchor = null;
+    let playersCardLobby = null;
+
+    function ensurePlayersCard() {
+        if (playersCard && playersCard.isConnected) return playersCard;
+        playersCard = document.createElement('div');
+        playersCard.id = 'ev-players-card';
+        playersCard.setAttribute('role', 'tooltip');
+        document.body.appendChild(playersCard);
+        // Scrolling the list moves the badge out from under the card: close it.
+        document.addEventListener('scroll', hidePlayersCard, true);
+        return playersCard;
+    }
+
+    function showPlayersCard(anchor, lobby) {
+        playersCardAnchor = anchor;
+        playersCardLobby = lobby;
+        const card = ensurePlayersCard();
+        fillPlayersCard(card, lobby, PLAYER_COUNTS[lobby.id]);
+        card.classList.add('open');
+        positionPlayersCard();
+    }
+
+    function hidePlayersCard() {
+        playersCardAnchor = null;
+        playersCardLobby = null;
+        if (playersCard) playersCard.classList.remove('open');
+    }
+
+    function positionPlayersCard() {
+        if (!playersCard || !playersCardAnchor) return;
+        const a = playersCardAnchor.getBoundingClientRect();
+        const w = playersCard.offsetWidth;
+        const h = playersCard.offsetHeight;
+        const gap = 8;
+        // Right edge lined up with the badge, below it; flipped above when it would run off-screen.
+        let left = Math.min(a.right - w, window.innerWidth - w - 12);
+        left = Math.max(12, left);
+        let top = a.bottom + gap;
+        if (top + h > window.innerHeight - 12) top = Math.max(12, a.top - gap - h);
+        playersCard.style.left = left + 'px';
+        playersCard.style.top = top + 'px';
+    }
+
+    function fillPlayersCard(card, lobby, c) {
+        card.textContent = '';
+        const head = document.createElement('div');
+        head.className = 'ev-pc-head';
+        const title = document.createElement('div');
+        title.className = 'ev-pc-title';
+        title.textContent = prettyGamemode(lobby.gamemode);
+        const region = document.createElement('div');
+        region.className = 'ev-pc-region';
+        region.textContent = prettyRegion(lobby.region);
+        head.appendChild(title);
+        head.appendChild(region);
+        card.appendChild(head);
+
+        const note = (text) => {
+            const n = document.createElement('div');
+            n.className = 'ev-pc-note';
+            n.textContent = text;
+            card.appendChild(n);
+        };
+        if (!c || (c.state === 'loading' && c.players === undefined)) { note('Counting players…'); return; }
+        if (c.state === 'error') { note('Could not count players: ' + c.error); return; }
+
+        const summary = document.createElement('div');
+        summary.className = 'ev-pc-summary';
+        const stat = (value, label, cls) => {
+            const box = document.createElement('div');
+            box.className = 'ev-pc-stat' + (cls ? ' ' + cls : '');
+            const v = document.createElement('span');
+            v.className = 'ev-pc-stat-value';
+            v.textContent = value;
+            const l = document.createElement('span');
+            l.className = 'ev-pc-stat-label';
+            l.textContent = label;
+            box.appendChild(v);
+            box.appendChild(l);
+            summary.appendChild(box);
+        };
+        stat(c.playing, 'playing', 'playing');
+        stat(c.waiting, 'watching', 'watching');
+        stat(c.bots, c.bots === 1 ? 'bot' : 'bots', 'bots');
+        card.appendChild(summary);
+
+        const humans = c.humans || [];
+        if (!humans.length) {
+            note('No players right now — only bots.');
+        } else {
+            const list = document.createElement('ol');
+            list.className = 'ev-pc-list';
+            humans.forEach((p) => {
+                const li = document.createElement('li');
+                li.className = p.playing ? 'playing' : 'watching';
+                const dot = document.createElement('span');
+                dot.className = 'ev-pc-dot';
+                const name = document.createElement('span');
+                name.className = 'ev-pc-name';
+                name.textContent = p.name;   // textContent: player names are untrusted
+                const meta = document.createElement('span');
+                meta.className = 'ev-pc-meta';
+                meta.textContent = p.playing ? `${p.kills} K · ${p.score}` : 'watching';
+                li.appendChild(dot);
+                li.appendChild(name);
+                li.appendChild(meta);
+                list.appendChild(li);
+            });
+            card.appendChild(list);
+        }
+
+        const foot = document.createElement('div');
+        foot.className = 'ev-pc-foot';
+        const age = Math.max(0, Math.round((Date.now() - c.at) / 1000));
+        foot.textContent = c.state === 'loading' ? 'Refreshing…' : (age < 5 ? 'Updated just now' : `Updated ${age}s ago`);
+        card.appendChild(foot);
     }
 
     function fillPlayerCount(el, c) {
@@ -1940,29 +2205,26 @@ window.addEventListener('load', () => {
         if (!c || (c.state === 'loading' && c.players === undefined)) {
             el.textContent = '… players';
             el.classList.add('pending');
-            el.title = 'Counting players';
             return;
         }
         if (c.state === 'error') {
             el.textContent = '? players';
             el.classList.add('pending');
-            el.title = 'Could not count players: ' + c.error;
             return;
         }
         // Players = every human in the room, including those still on the click-to-play screen.
         el.textContent = `${c.players} player${c.players === 1 ? '' : 's'}`;
         el.classList.add(c.players > 0 ? 'busy' : 'empty');
-        const lines = [];
-        if (c.names && c.names.length) lines.push(c.names.join(', '));
-        lines.push(`${c.playing} playing` + (c.waiting ? `, ${c.waiting} watching` : ''));
-        lines.push(`${c.bots} bot${c.bots === 1 ? '' : 's'}`);
-        el.title = lines.join('\n');
     }
 
     function updatePlayerCountCell(roomId) {
         document.querySelectorAll('#ev-lobbies-list .ev-lobby-players').forEach((el) => {
             if (el.dataset.roomId === roomId) fillPlayerCount(el, PLAYER_COUNTS[roomId]);
         });
+        if (playersCard && playersCardLobby && playersCardLobby.id === roomId && playersCardAnchor && playersCardAnchor.isConnected) {
+            fillPlayersCard(playersCard, playersCardLobby, PLAYER_COUNTS[roomId]);
+            positionPlayersCard();
+        }
     }
 
     // ----------------- load from the live matchmaker -----------------
