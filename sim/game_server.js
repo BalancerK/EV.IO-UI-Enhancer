@@ -12189,7 +12189,7 @@ function bootServer() {
   // specific promise instead is the only correct way to know _live.handleConnection exists yet.
   // Load the hosted extra-maps list before resolving the startup map, so a map from it is found.
   _live.readyPromise = bpw.ready
-    .then(() => mapLoader.refreshExtraMaps())
+    .then(() => mapLoader.ensureExtraMaps())
     .then(loadStartupMap)
     .then(() => {
       console.log("[evio-local] extracted physics world ready — starting server");

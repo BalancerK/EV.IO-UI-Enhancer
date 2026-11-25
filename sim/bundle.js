@@ -21858,6 +21858,7 @@ var EvioSim = (() => {
   var map_loader_exports = {};
   __export(map_loader_exports, {
     cachedMaps: () => cachedMaps,
+    ensureExtraMaps: () => ensureExtraMaps,
     fetchEvmap: () => fetchEvmap,
     findMap: () => findMap,
     listMaps: () => listMaps,
@@ -21937,6 +21938,12 @@ var EvioSim = (() => {
     }
     return _extra.length;
   }
+  var _extraPromise = null;
+  function ensureExtraMaps() {
+    if (!_extraPromise) _extraPromise = refreshExtraMaps();
+    return _extraPromise;
+  }
+  if (typeof caches !== "undefined" && typeof fetch === "function") ensureExtraMaps();
   function listMaps() {
     if (_merged) return _merged;
     const extraIds = new Set(_extra.map((m2) => String(m2.nid)));
@@ -21994,6 +22001,7 @@ var EvioSim = (() => {
     return { buf, fromCache: false };
   }
   async function loadMap(idOrTitleOrUrl) {
+    await ensureExtraMaps();
     const map = findMap(idOrTitleOrUrl);
     if (!map) throw new Error(`unknown map: ${idOrTitleOrUrl}`);
     const hit = _worldCache.get(map.evmapUrl);
@@ -31331,7 +31339,7 @@ var EvioSim = (() => {
         console.error(`[evio-local] GC observer failed to start (diagnostic only, non-fatal): ${err.message}`);
       }
     }
-    _live.readyPromise = physics_world_default.ready.then(() => refreshExtraMaps()).then(loadStartupMap).then(() => {
+    _live.readyPromise = physics_world_default.ready.then(() => ensureExtraMaps()).then(loadStartupMap).then(() => {
       console.log("[evio-local] extracted physics world ready \u2014 starting server");
       startServer();
       reconcileBotCount();

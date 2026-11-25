@@ -97,6 +97,16 @@ async function refreshExtraMaps() {
   return _extra.length;
 }
 
+// Load the list at most once per worker lifetime, and start that as soon as this module loads:
+// the MV3 service worker is stopped when idle and restarted on demand, and a restarted worker must
+// know the extra maps before anything lists or loads maps — not only after a hosted game boots.
+let _extraPromise = null;
+function ensureExtraMaps() {
+  if (!_extraPromise) _extraPromise = refreshExtraMaps();
+  return _extraPromise;
+}
+if (typeof caches !== 'undefined' && typeof fetch === 'function') ensureExtraMaps();
+
 // The official snapshot plus the extra list; an extra entry replaces a snapshot one with the same nid.
 function listMaps() {
   if (_merged) return _merged;
@@ -172,6 +182,7 @@ async function fetchEvmap(url) {
  * { map, world, spawns, teleporters, navmesh, pickupPoints, vertices, indices, groupIds, tris, fromCache, buildMs }.
  */
 async function loadMap(idOrTitleOrUrl) {
+  await ensureExtraMaps();
   const map = findMap(idOrTitleOrUrl);
   if (!map) throw new Error(`unknown map: ${idOrTitleOrUrl}`);
 
@@ -208,4 +219,4 @@ async function cachedMaps() {
   return listMaps().filter((m) => cachedUrls.has(m.evmapUrl));
 }
 
-export { listMaps, findMap, loadMap, fetchEvmap, cachedMaps, refreshExtraMaps, parseExtraList };
+export { listMaps, findMap, loadMap, fetchEvmap, cachedMaps, refreshExtraMaps, ensureExtraMaps, parseExtraList };

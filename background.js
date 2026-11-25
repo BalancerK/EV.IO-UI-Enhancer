@@ -691,6 +691,9 @@ async function handleAdminRequest(path, method, body) {
             return { ok: r.ok, status: r.ok ? 200 : 400, body: r };
         }
         if (method === 'GET' && path === '/api/maps') {
+            // The hosted extra-maps list (community maps) must be loaded before listing — this
+            // worker may have just been restarted, long after any hosted game booted.
+            await sim.gameServer.mapLoader.ensureExtraMaps();
             const cached = new Set((await sim.gameServer.mapLoader.cachedMaps()).map((m) => m.nid));
             return {
                 ok: true, status: 200,
