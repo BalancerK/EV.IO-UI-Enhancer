@@ -405,11 +405,35 @@ window.addEventListener('load', () => {
     color: #7dff7d;
 }
 
-#ev-lobbies-status {
+.ev-lobbies-toolbar {
+    display: flex;
+    justify-content: flex-end;
+}
+.ev-btn-refresh {
+    padding: 6px 16px;
     font-size: 13px;
-    opacity: 0.8;
-    margin-top: 4px;
-    min-height: 18px;
+    font-weight: 600;
+    border-radius: 6px;
+    border: 1px solid rgba(255,255,255,0.22);
+    background: rgba(255,255,255,0.07);
+    color: #fff;
+    cursor: pointer;
+}
+.ev-btn-refresh:hover:not(:disabled) {
+    background: rgba(255,255,255,0.14);
+}
+.ev-btn-refresh:focus-visible {
+    outline: 2px solid rgba(255,255,255,0.7);
+    outline-offset: 2px;
+}
+.ev-btn-refresh:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+.ev-lobbies-empty {
+    padding: 14px 0;
+    font-size: 14px;
+    opacity: 0.7;
 }
 
 #ev-lobbies-nav-wrapper {
@@ -1446,20 +1470,20 @@ window.addEventListener('load', () => {
         const officialView = document.createElement('div');
         officialView.id = 'ev-official-view';
 
-        const info = document.createElement('p');
-        info.style.marginTop = '0';
-        info.style.marginBottom = '8px';
-        info.textContent = 'Click a lobby to join it.';
-
-        const status = document.createElement('div');
-        status.id = 'ev-lobbies-status';
-        status.textContent = '';
+        const toolbar = document.createElement('div');
+        toolbar.className = 'ev-lobbies-toolbar';
+        const refreshBtn = document.createElement('button');
+        refreshBtn.type = 'button';
+        refreshBtn.id = 'ev-lobbies-refresh';
+        refreshBtn.className = 'ev-btn-refresh';
+        refreshBtn.textContent = 'Refresh';
+        refreshBtn.addEventListener('click', () => forceRefreshLobbies());
+        toolbar.appendChild(refreshBtn);
 
         const list = document.createElement('div');
         list.id = 'ev-lobbies-list';
 
-        officialView.appendChild(info);
-        officialView.appendChild(status);
+        officialView.appendChild(toolbar);
         officialView.appendChild(list);
         content.appendChild(officialView);
 
@@ -1789,10 +1813,19 @@ window.addEventListener('load', () => {
         loadQuickAdminMaps();
     }
 
+    // Loading/error messages show inside the list itself, and only while it has no rooms.
+    let lobbyListMessage = '';
     function setStatus(msg) {
-        const status = document.getElementById('ev-lobbies-status');
-        if (!status) return;
-        status.textContent = msg || '';
+        lobbyListMessage = msg || '';
+        const list = document.getElementById('ev-lobbies-list');
+        if (!list || list.querySelector('.ev-lobby-row')) return;
+        list.textContent = '';
+        if (lobbyListMessage) {
+            const note = document.createElement('div');
+            note.className = 'ev-lobbies-empty';
+            note.textContent = lobbyListMessage;
+            list.appendChild(note);
+        }
     }
 
     // ----------------- render list -----------------
@@ -1804,7 +1837,7 @@ window.addEventListener('load', () => {
     list.innerHTML = '';
 
     if (!Array.isArray(LOBBIES) || !LOBBIES.length) {
-        setStatus('No lobby data found.');
+        setStatus(lobbiesLoading ? 'Loading lobbies…' : lobbyListMessage);
         return;
     }
 
@@ -2031,15 +2064,42 @@ window.addEventListener('load', () => {
         });
     }
 
+    const probesInFlight = new Set();
+
     function pumpProbeQueue() {
         while (probeQueue.length) {
             const room = probeQueue.shift();
-            probeLobby(room)
+            const job = probeLobby(room)
                 .then((r) => { PLAYER_COUNTS[room.id] = { state: 'ok', at: Date.now(), ...r }; })
                 .catch((e) => { PLAYER_COUNTS[room.id] = { state: 'error', at: Date.now(), error: e.message }; })
                 .finally(() => {
+                    probesInFlight.delete(job);
                     updatePlayerCountCell(room.id);
                 });
+            probesInFlight.add(job);
+        }
+    }
+
+    // Refresh button: fetch the room list, pings and every player count again, ignoring the
+    // 60 s cache. The old numbers stay on screen until the new ones arrive.
+    let refreshingLobbies = false;
+    async function forceRefreshLobbies() {
+        if (refreshingLobbies) return;
+        refreshingLobbies = true;
+        const btn = document.getElementById('ev-lobbies-refresh');
+        if (btn) { btn.disabled = true; btn.textContent = 'Refreshing…'; }
+        try {
+            Object.values(PLAYER_COUNTS).forEach((c) => { if (c.state !== 'loading') c.at = 0; });
+            const latency = refreshRegionLatency();
+            if (!lobbiesLoading) {
+                lobbiesLoaded = false;
+                await loadLobbiesFromBundle();   // re-renders and queues the probes
+            }
+            await latency;
+            await Promise.allSettled([...probesInFlight]);
+        } finally {
+            refreshingLobbies = false;
+            if (btn) { btn.disabled = false; btn.textContent = 'Refresh'; }
         }
     }
 
@@ -2287,9 +2347,7 @@ window.addEventListener('load', () => {
                 return;
             }
 
-            if (!data.length) {
-                setStatus('Lobby list is empty.');
-            }
+            setStatus(data.length ? '' : 'No public lobbies right now.');
 
             LOBBIES = data;
             lobbiesLoaded = true;
@@ -2402,7 +2460,7 @@ window.addEventListener('load', () => {
             lobbiesLoaded = false;
         }
         if (!lobbiesLoaded && !lobbiesLoading) {
-            if (!LOBBIES || !LOBBIES.length) setStatus('Loading lobby list ...');
+            if (!LOBBIES || !LOBBIES.length) setStatus('Loading lobbies…');
             loadLobbiesFromBundle();
         } else {
             renderLobbyList();
