@@ -254,6 +254,24 @@ window.addEventListener('load', () => {
     font-size: 17px;
     opacity: 0.9;
 }
+.ev-lobby-right {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-shrink: 0;
+}
+.ev-lobby-players {
+    font-size: 17px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+.ev-lobby-players.busy {
+    color: #7dff7d;
+}
+.ev-lobby-players.empty,
+.ev-lobby-players.pending {
+    opacity: 0.6;
+}
 .ev-lobby-latency.full {
     color: #ff6969;
 }
@@ -617,6 +635,7 @@ window.addEventListener('load', () => {
     let LOBBIES = null;
     let lobbiesLoaded = false;
     let lobbiesLoading = false;
+    let lobbiesLoadedAt = 0;
     let REGION_LATENCY = {}; // region id -> ms, or null if unreachable
 
     // ----------------- player-hosted lobbies -----------------
@@ -1689,12 +1708,8 @@ window.addEventListener('load', () => {
         name.className = 'ev-lobby-name';
         name.textContent = `[${prettyRegion(lobby.region)}] ${prettyGamemode(lobby.gamemode)}`;
 
-        // Player count removed — there's no endpoint left to back it (see refreshRegionLatency's
-        // own comment: the old per-lobby /players HTTP endpoint doesn't exist under 1-7-1's
-        // shared-host matchmaker architecture, and official's own lobby browser doesn't show a
-        // count either). Region latency takes its spot instead, reusing the exact same
-        // full/mid/low color scale that used to mean "crowded/busy/quiet" for player count —
-        // here low ms is good (green) the same way a low headcount used to be.
+        // Region latency, colored by the same full/mid/low scale (low ms = green). The player
+        // count beside it comes from probeLobby() below — the matchmaker reports no counts.
         const latency = document.createElement('div');
         latency.className = 'ev-lobby-latency';
 
@@ -1711,8 +1726,13 @@ window.addEventListener('load', () => {
             else latency.classList.add('low');
         }
 
+        const right = document.createElement('div');
+        right.className = 'ev-lobby-right';
+        right.appendChild(renderPlayerCount(lobby.id));
+        right.appendChild(latency);
+
         main.appendChild(name);
-        main.appendChild(latency);
+        main.appendChild(right);
         row.appendChild(main);
 
         row.addEventListener('click', () => {
@@ -1728,6 +1748,219 @@ window.addEventListener('load', () => {
     });
 }
 
+
+    // ----------------- player counts (guest probe) -----------------
+
+    // The matchmaker reports no player counts, so each room is asked directly: join it as a guest
+    // over the game WebSocket, read the first state packets (which list every player entity),
+    // and leave about a second later. Same protocol as tools/probe_lobby.py:
+    //   server "ID<clientId>"  ->  client ";{join}"  ->  server ";1" + msgpack [sync, tick, body]
+    // body is a flat [op, value, ...] list; a player entity starts `244, id, 90, id, 91, joinState`
+    // and carries displayName 210 and isBot 237 further on. joinState 0 = connected but still on
+    // "click to play". The probe never clicks play, so it gets no scoreboard row, is excluded
+    // from its own count, and drops out of the room's roster within seconds of leaving (tested).
+    // This content script runs in the isolated world, so page-socket-hook's WebSocket patch never
+    // sees these sockets.
+    const PROBE_TTL_MS = 60000;      // reuse a room's count for this long
+    const PROBE_STAY_MS = 1000;      // how long to stay after the join is accepted
+    const PROBE_TIMEOUT_MS = 6000;
+    const PROBE_PARALLEL = 3;
+    const PLAYER_COUNTS = {};        // room id -> { state: 'loading'|'ok'|'error', at, playing, waiting, bots, names, error }
+    let probeQueue = [];
+    let probesRunning = 0;
+
+    function msgpackDecode(buf) {
+        const view = new DataView(buf);
+        const bytes = new Uint8Array(buf);
+        const text = new TextDecoder();
+        let i = 0;
+        const str = (n) => { const s = text.decode(bytes.subarray(i, i + n)); i += n; return s; };
+        const arr = (n) => { const out = new Array(n); for (let k = 0; k < n; k++) out[k] = read(); return out; };
+        const map = (n) => { const out = {}; for (let k = 0; k < n; k++) { const key = read(); out[key] = read(); } return out; };
+        const ext = (n) => { i += 1 + n; return null; };
+        function read() {
+            const t = bytes[i++];
+            if (t <= 0x7f) return t;
+            if (t >= 0xe0) return t - 0x100;
+            if (t >= 0x80 && t <= 0x8f) return map(t & 0x0f);
+            if (t >= 0x90 && t <= 0x9f) return arr(t & 0x0f);
+            if (t >= 0xa0 && t <= 0xbf) return str(t & 0x1f);
+            let v;
+            switch (t) {
+                case 0xc0: return null;
+                case 0xc2: return false;
+                case 0xc3: return true;
+                case 0xc4: v = bytes[i]; i += 1; i += v; return null;
+                case 0xc5: v = view.getUint16(i); i += 2 + v; return null;
+                case 0xc6: v = view.getUint32(i); i += 4 + v; return null;
+                case 0xc7: v = bytes[i]; i += 1; return ext(v);
+                case 0xc8: v = view.getUint16(i); i += 2; return ext(v);
+                case 0xc9: v = view.getUint32(i); i += 4; return ext(v);
+                case 0xca: v = view.getFloat32(i); i += 4; return v;
+                case 0xcb: v = view.getFloat64(i); i += 8; return v;
+                case 0xcc: return bytes[i++];
+                case 0xcd: v = view.getUint16(i); i += 2; return v;
+                case 0xce: v = view.getUint32(i); i += 4; return v;
+                case 0xcf: v = Number(view.getBigUint64(i)); i += 8; return v;
+                case 0xd0: v = view.getInt8(i); i += 1; return v;
+                case 0xd1: v = view.getInt16(i); i += 2; return v;
+                case 0xd2: v = view.getInt32(i); i += 4; return v;
+                case 0xd3: v = Number(view.getBigInt64(i)); i += 8; return v;
+                case 0xd4: return ext(1);
+                case 0xd5: return ext(2);
+                case 0xd6: return ext(4);
+                case 0xd7: return ext(8);
+                case 0xd8: return ext(16);
+                case 0xd9: v = bytes[i]; i += 1; return str(v);
+                case 0xda: v = view.getUint16(i); i += 2; return str(v);
+                case 0xdb: v = view.getUint32(i); i += 4; return str(v);
+                case 0xdc: v = view.getUint16(i); i += 2; return arr(v);
+                case 0xdd: v = view.getUint32(i); i += 4; return arr(v);
+                case 0xde: v = view.getUint16(i); i += 2; return map(v);
+                case 0xdf: v = view.getUint32(i); i += 4; return map(v);
+            }
+            throw new Error('bad msgpack byte ' + t);
+        }
+        return read();
+    }
+
+    // Every player entity in one state body: id -> { name, bot, joinState }.
+    function collectPlayers(body, into) {
+        for (let s = 0; s + 3 < body.length; s++) {
+            if (body[s] !== 244 || body[s + 2] !== 90 || body[s + 3] !== body[s + 1]) continue;
+            let e = s + 4;
+            while (e + 3 < body.length && !(body[e] === 244 && body[e + 2] === 90 && body[e + 3] === body[e + 1])) e++;
+            const seg = body.slice(s, e + 3 < body.length ? e : body.length);
+            const base = Math.max(0, seg.indexOf(210));
+            const after = (op) => { const j = seg.indexOf(op, base); return j >= 0 ? seg[j + 1] : undefined; };
+            into[String(seg[1])] = {
+                name: after(210),
+                bot: after(237) === true,
+                joinState: seg[4] === 91 ? seg[5] : undefined,
+            };
+        }
+    }
+
+    function probeLobby(room) {
+        return new Promise((resolve, reject) => {
+            let ws;
+            try {
+                ws = new WebSocket(room.connectionUrl);
+            } catch (e) {
+                reject(e);
+                return;
+            }
+            ws.binaryType = 'arraybuffer';
+            const players = {};
+            let clientId = null;
+            let stayTimer = null;
+            const finish = (err) => {
+                clearTimeout(hardTimer);
+                clearTimeout(stayTimer);
+                try { ws.close(1000); } catch (e) { /* already closed */ }
+                if (err) { reject(err); return; }
+                delete players[clientId];   // never count the probe itself
+                const list = Object.values(players);
+                resolve({
+                    playing: list.filter((p) => !p.bot && p.joinState !== 0).length,
+                    waiting: list.filter((p) => !p.bot && p.joinState === 0).length,
+                    bots: list.filter((p) => p.bot).length,
+                    names: list.filter((p) => !p.bot && p.joinState !== 0).map((p) => p.name).filter(Boolean),
+                });
+            };
+            const hardTimer = setTimeout(() => finish(stayTimer ? null : new Error('timed out')), PROBE_TIMEOUT_MS);
+            ws.onerror = () => finish(new Error('connection failed'));
+            ws.onclose = () => { if (stayTimer) finish(null); else finish(new Error('closed by server')); };
+            ws.onmessage = (ev) => {
+                if (typeof ev.data === 'string') {
+                    const kind = ev.data[0];
+                    if (ev.data.startsWith('ID') && clientId === null) {
+                        clientId = ev.data.slice(2);
+                        ws.send(';' + JSON.stringify({
+                            uid: 17, token: '', mmLobbyId: room.id, buildIdentifier: '1.6.4-release-no-obf',
+                            id: '', adminPass: '', isShareGame: false,
+                        }));
+                    } else if (kind === ';') {
+                        if (!ev.data.startsWith(';1')) finish(new Error('join refused'));
+                        else stayTimer = setTimeout(() => finish(null), PROBE_STAY_MS);
+                    } else if (kind === '!') {
+                        finish(new Error(ev.data === '!7' ? 'room full' : 'refused (' + ev.data + ')'));
+                    }
+                    return;
+                }
+                try {
+                    const packet = msgpackDecode(ev.data);
+                    if (Array.isArray(packet) && Array.isArray(packet[2])) collectPlayers(packet[2], players);
+                } catch (e) { /* skip a packet we can't decode */ }
+            };
+        });
+    }
+
+    function pumpProbeQueue() {
+        while (probesRunning < PROBE_PARALLEL && probeQueue.length) {
+            const room = probeQueue.shift();
+            probesRunning++;
+            probeLobby(room)
+                .then((r) => { PLAYER_COUNTS[room.id] = { state: 'ok', at: Date.now(), ...r }; })
+                .catch((e) => { PLAYER_COUNTS[room.id] = { state: 'error', at: Date.now(), error: e.message }; })
+                .finally(() => {
+                    probesRunning--;
+                    updatePlayerCountCell(room.id);
+                    pumpProbeQueue();
+                });
+        }
+    }
+
+    // Queue a probe for every room whose count is missing or older than PROBE_TTL_MS.
+    function refreshPlayerCounts() {
+        const now = Date.now();
+        (LOBBIES || []).forEach((room) => {
+            if (!room || !room.id || !room.connectionUrl) return;
+            const c = PLAYER_COUNTS[room.id];
+            if (c && (c.state === 'loading' || now - c.at < PROBE_TTL_MS)) return;
+            // Keep the last good numbers on screen while the new probe runs.
+            PLAYER_COUNTS[room.id] = { ...(c && c.state === 'ok' ? c : {}), state: 'loading', at: now };
+            probeQueue.push(room);
+        });
+        pumpProbeQueue();
+    }
+
+    function renderPlayerCount(roomId) {
+        const el = document.createElement('div');
+        el.className = 'ev-lobby-players';
+        el.dataset.roomId = roomId;
+        fillPlayerCount(el, PLAYER_COUNTS[roomId]);
+        return el;
+    }
+
+    function fillPlayerCount(el, c) {
+        el.classList.remove('busy', 'empty', 'pending');
+        if (!c || (c.state === 'loading' && c.playing === undefined)) {
+            el.textContent = '… players';
+            el.classList.add('pending');
+            el.title = 'Counting players';
+            return;
+        }
+        if (c.state === 'error') {
+            el.textContent = '? players';
+            el.classList.add('pending');
+            el.title = 'Could not count players: ' + c.error;
+            return;
+        }
+        el.textContent = `${c.playing} playing`;
+        el.classList.add(c.playing > 0 ? 'busy' : 'empty');
+        const lines = [];
+        if (c.names && c.names.length) lines.push(c.names.join(', '));
+        if (c.waiting) lines.push(`${c.waiting} on the click-to-play screen`);
+        lines.push(`${c.bots} bot${c.bots === 1 ? '' : 's'}`);
+        el.title = lines.join('\n');
+    }
+
+    function updatePlayerCountCell(roomId) {
+        document.querySelectorAll('#ev-lobbies-list .ev-lobby-players').forEach((el) => {
+            if (el.dataset.roomId === roomId) fillPlayerCount(el, PLAYER_COUNTS[roomId]);
+        });
+    }
 
     // ----------------- load from the live matchmaker -----------------
 
@@ -1809,8 +2042,10 @@ window.addEventListener('load', () => {
 
             LOBBIES = data;
             lobbiesLoaded = true;
+            lobbiesLoadedAt = Date.now();
             console.log('[ev-lobbies] Loaded lobbies:', LOBBIES);
             renderLobbyList();
+            refreshPlayerCounts();
         } catch (err) {
             console.error('[ev-lobbies] Error loading lobbies from matchmaker:', err);
             setStatus('Error loading lobby list.');
@@ -1910,11 +2145,17 @@ window.addEventListener('load', () => {
     function openLobbyBrowser() {
         showLobbyModule();
         refreshRegionLatency(); // cheap (3 tiny GETs), refresh every open rather than caching
+        // Rooms open and close every few minutes, so a list older than the count TTL is
+        // fetched again (which re-probes); otherwise just refresh any stale counts.
+        if (lobbiesLoaded && !lobbiesLoading && Date.now() - lobbiesLoadedAt > PROBE_TTL_MS) {
+            lobbiesLoaded = false;
+        }
         if (!lobbiesLoaded && !lobbiesLoading) {
-            setStatus('Loading lobby list ...');
+            if (!LOBBIES || !LOBBIES.length) setStatus('Loading lobby list ...');
             loadLobbiesFromBundle();
         } else {
             renderLobbyList();
+            refreshPlayerCounts();
         }
     }
 
