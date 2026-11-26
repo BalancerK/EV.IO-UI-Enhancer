@@ -19527,8 +19527,13 @@ var EvioSim = (() => {
       // saying 3 a moment later was too late to matter.
       91,
       Number.isFinite(options.playerState) ? options.playerState : 1,
+      // 93 abilityBuild. To the player themself it is their build, and with none in the join that is the
+      // DEFAULT build: the client leaves the build out when it equals the default, and the ability bar
+      // draws its icons from this array (refreshAbilityIcons) and only allows a cast when
+      // abilityBuild[id] > 0 — an empty array meant no ability icons and no casting. Official sends a
+      // peer [] (getGameStateDiff: "S === e ? build : []").
       93,
-      Array.isArray(options.abilitySeed) ? options.abilitySeed : []
+      ownAbilityBuild(options)
     );
     pushStats(body, stats);
     body.push(
@@ -19820,12 +19825,16 @@ var EvioSim = (() => {
     body.push(298, Number.isFinite(options.roundStartTick) ? options.roundStartTick : 0);
     return body;
   }
+  function ownAbilityBuild(options) {
+    if (options.peer) return [];
+    return Array.isArray(options.abilitySeed) && options.abilitySeed.length ? options.abilitySeed : DEFAULT_ABILITY_BUILD.slice();
+  }
   function buildLoadoutDelta(options = {}) {
     const playerId = String(options.playerId ?? "local-player");
     const weaponId = Number.isFinite(options.weaponId) ? options.weaponId : 4;
     const equippedWeaponId = Number.isFinite(options.equippedWeaponId) ? options.equippedWeaponId : weaponId;
-    const weaponStateArray = Array.isArray(options.abilitySeed) ? options.abilitySeed : [];
-    const stats = computeWeaponStats(weaponStateArray.length ? weaponStateArray : DEFAULT_ABILITY_BUILD);
+    const weaponStateArray = ownAbilityBuild(options);
+    const stats = computeWeaponStats(weaponStateArray);
     const body = [
       244,
       playerId,
@@ -19852,13 +19861,14 @@ var EvioSim = (() => {
       130,
       -1
     );
-    if (typeof options.clan === "string" && options.clan) {
-      body.push(235, options.clan);
-    }
     if (weaponId !== SWORD_WEAPON_ID) {
       body.push(135, weaponId, 132, 999, 133, 30, 134, 0);
     }
     body.push(135, SWORD_WEAPON_ID, 132, 999999, 133, 999999, 134, 0);
+    if (Number.isFinite(options.buildChangeTick)) body.push(194, options.buildChangeTick);
+    if (typeof options.clan === "string" && options.clan) {
+      body.push(235, options.clan);
+    }
     return body;
   }
   function buildStatePacket(options = {}) {
@@ -22160,7 +22170,7 @@ var EvioSim = (() => {
     resolve: (...parts) => parts.join("/"),
     basename: (p2) => String(p2).split(/[\\/]/).pop()
   };
-  var MAX_ABILITY_SEED_LEN = Math.max(...Object.keys(ABILITY_TABLES).map(Number)) + 1;
+  var MAX_ABILITY_SEED_LEN = Math.max(Math.max(...Object.keys(ABILITY_TABLES).map(Number)) + 1, DEFAULT_ABILITY_BUILD.length);
   function _sanitizeAbilitySeed(arr) {
     if (!Array.isArray(arr)) return [];
     const src = arr.length > MAX_ABILITY_SEED_LEN ? arr.slice(0, MAX_ABILITY_SEED_LEN) : arr;
@@ -26411,6 +26421,7 @@ var EvioSim = (() => {
     }
     if (isGun && !(p2.switchTimer > 0) && p2.reloadTicks <= 0 && p2.gunAmmo < weaponClip(p2.equippedWeaponId, p2) && (p2.gunAmmo <= 0 || held.has(30))) {
       p2.reloadTicks = weaponReloadTicks(p2.equippedWeaponId, p2);
+      p2.lastReloadDuration = p2.reloadTicks;
     }
     const _cdTicks = weaponCooldownTicks(p2.equippedWeaponId);
     const _atcGate = SERVER_RECOIL && ps2 && Number.isFinite(ps2.Qezh4wz);
@@ -28511,6 +28522,11 @@ var EvioSim = (() => {
       })(),
       151,
       playerState.slideBoostTick || 0,
+      // 152 lastWeaponReloadDuration — set when a reload starts (official: 57 for the AR). The reload
+      // bar shows while reloadTimer === this, and the reload animation is a fraction of it; left at
+      // -9999 the bar never appeared and every reconcile overwrote the client's own value.
+      152,
+      Number.isFinite(playerState.lastReloadDuration) ? playerState.lastReloadDuration : -9999,
       // 155/156 Qcqglqd/Qte59p5 — player model scale. See SURVIVAL_BOSS_SCALE's own comment.
       155,
       Number.isFinite(playerState.modelScale) ? playerState.modelScale : 1,
@@ -28788,6 +28804,8 @@ var EvioSim = (() => {
       uid: Number.isFinite(peer.uid) ? peer.uid : 17,
       weaponId: Number.isFinite(peer.weaponId) ? peer.weaponId : SWORD_ONLY ? SWORD_WEAPON_ID2 : 4,
       abilitySeed: peer.abilitySeed,
+      peer: true,
+      // opcode 93 = [] for someone else, as official
       teamId: peer.teamId || 0,
       spawnProtectTicks: _psOf(peer.playerState).Qalaptp,
       // The bootstrap is the first state the client decodes, and its lobby UI is built from it — a
@@ -28935,7 +28953,9 @@ var EvioSim = (() => {
       }
     }
     if (Array.isArray(arr) && arr.length) {
+      const _prevBuild = JSON.stringify(session.abilitySeed || []);
       session.abilitySeed = _sanitizeAbilitySeed(arr);
+      if (JSON.stringify(session.abilitySeed) !== _prevBuild) session.buildChangeTick = _live.globalTick || 0;
       if (playerState._ps && playerState._ps.Qz8l93a) {
         Object.assign(playerState._ps.Qz8l93a, computeWeaponStats(session.abilitySeed));
         refreshMagazineCapacity(playerState);
@@ -28954,6 +28974,8 @@ var EvioSim = (() => {
       weaponId: session.weaponId,
       equippedWeaponId: playerState.equippedWeaponId,
       abilitySeed: session.abilitySeed,
+      // 194: the client redraws the ability bar only when lastTickBuildChange changes
+      buildChangeTick: Number.isFinite(session.buildChangeTick) ? session.buildChangeTick : void 0,
       clan: session.clanImgUrl,
       // late-arriving clan insignia (social socket)
       // Must match what the tick body is saying this instant. A held player is mid-arrival, and one
@@ -28993,7 +29015,12 @@ var EvioSim = (() => {
       changed = true;
     }
     if (Array.isArray(data.abilitySeed) && data.abilitySeed.length) {
+      const _prevBuild = JSON.stringify(session.abilitySeed || []);
       session.abilitySeed = _sanitizeAbilitySeed(data.abilitySeed);
+      if (JSON.stringify(session.abilitySeed) !== _prevBuild) {
+        session.buildChangeTick = _live.globalTick || 0;
+        session.loadoutDeltaSendCount = Math.max(session.loadoutDeltaSendCount || 0, 6);
+      }
       if (playerState._ps && playerState._ps.Qz8l93a) {
         Object.assign(playerState._ps.Qz8l93a, computeWeaponStats(session.abilitySeed));
         refreshMagazineCapacity(playerState);

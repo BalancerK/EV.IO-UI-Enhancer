@@ -25,7 +25,9 @@ import cachedWeaponsData from "./weapons.json";
 // The ability array (Q3i8qs3, opcode 93) is INDEXED BY ABILITY ID and the ids run 0..16 — so it needs
 // 17 entries. Derived from the table rather than written as a literal: a hand-picked 16 silently cut
 // off id 16, the impulse grenade, which is exactly the kind of off-by-one a magic number invites.
-const MAX_ABILITY_SEED_LEN = Math.max(...Object.keys(ABILITY_TABLES).map(Number)) + 1;
+// The client's own build is 19 long (makeDefaultAbilityObject; ids 17 and 18 are unused padding), and
+// official sends all 19 back in 93, so keep that length rather than cutting it to the 17 ids we know.
+const MAX_ABILITY_SEED_LEN = Math.max(Math.max(...Object.keys(ABILITY_TABLES).map(Number)) + 1, DEFAULT_ABILITY_BUILD.length);
 
 // One sanitiser for all three places a loadout arrives (the join, RPC 7, and the userscript's live
 // push). They had drifted: only the join was length-capped, so a truncated join array was what the
@@ -5068,6 +5070,7 @@ function preTickFire(p, frames) {
   if (isGun && !(p.switchTimer > 0) && p.reloadTicks <= 0 && p.gunAmmo < weaponClip(p.equippedWeaponId, p) &&
       (p.gunAmmo <= 0 || held.has(30))) {
     p.reloadTicks = weaponReloadTicks(p.equippedWeaponId, p);
+    p.lastReloadDuration = p.reloadTicks;   // opcode 152, as the client's own reload sets it
   }
   // Fire gate = the client's EXACT condition: actionTickCounter + 1 >= cooldown (bundle, see :311).
   // atc (Qezh4wz) is the recoil counter, incremented later in tickRecoilPitch, so use the pre-increment
@@ -8027,6 +8030,10 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       150, (() => { const d = deathWireTicks(playerState); if (d !== null) return d;
         return Number.isFinite(playerState._deathTick) ? Math.max(0, (_live.globalTick || 0) - playerState._deathTick) : 9999; })(),
       151, playerState.slideBoostTick || 0,
+      // 152 lastWeaponReloadDuration — set when a reload starts (official: 57 for the AR). The reload
+      // bar shows while reloadTimer === this, and the reload animation is a fraction of it; left at
+      // -9999 the bar never appeared and every reconcile overwrote the client's own value.
+      152, Number.isFinite(playerState.lastReloadDuration) ? playerState.lastReloadDuration : -9999,
       // 155/156 Qcqglqd/Qte59p5 — player model scale. See SURVIVAL_BOSS_SCALE's own comment.
       155, Number.isFinite(playerState.modelScale) ? playerState.modelScale : 1,
       156, Number.isFinite(playerState.modelScale) ? playerState.modelScale : 1,
@@ -8404,6 +8411,7 @@ function buildPeerBootstrapDelta(peer) {
     uid: Number.isFinite(peer.uid) ? peer.uid : 17,
     weaponId: Number.isFinite(peer.weaponId) ? peer.weaponId : (SWORD_ONLY ? SWORD_WEAPON_ID : 4),
     abilitySeed: peer.abilitySeed,
+    peer: true,   // opcode 93 = [] for someone else, as official
     teamId: peer.teamId || 0,
     spawnProtectTicks: _psOf(peer.playerState).Qalaptp,
     // The bootstrap is the first state the client decodes, and its lobby UI is built from it — a
@@ -8602,7 +8610,9 @@ function handleLoadoutRpc(session, playerState, text) {
   let arr = arg;
   if (typeof arr === "string") { try { arr = JSON.parse(arr); } catch (_) { arr = null; } }
   if (Array.isArray(arr) && arr.length) {
+    const _prevBuild = JSON.stringify(session.abilitySeed || []);
     session.abilitySeed = _sanitizeAbilitySeed(arr);
+    if (JSON.stringify(session.abilitySeed) !== _prevBuild) session.buildChangeTick = _live.globalTick || 0;
     if (playerState._ps && playerState._ps.Qz8l93a) {
       Object.assign(playerState._ps.Qz8l93a, computeWeaponStats(session.abilitySeed));
       refreshMagazineCapacity(playerState);   // capacity depends on the stats just applied
@@ -8623,6 +8633,8 @@ function flushLoadoutDelta(session, playerState, body) {
     weaponId: session.weaponId,
     equippedWeaponId: playerState.equippedWeaponId,
     abilitySeed: session.abilitySeed,
+    // 194: the client redraws the ability bar only when lastTickBuildChange changes
+    buildChangeTick: Number.isFinite(session.buildChangeTick) ? session.buildChangeTick : undefined,
     clan: session.clanImgUrl,   // late-arriving clan insignia (social socket)
     // Must match what the tick body is saying this instant. A held player is mid-arrival, and one
     // stray 1 here locks their clone into first person permanently — see the note in the builder.
@@ -8667,7 +8679,12 @@ function applyLiveLoadout(session, playerState, jsonStr, sessions) {
     changed = true;
   }
   if (Array.isArray(data.abilitySeed) && data.abilitySeed.length) {
+    const _prevBuild = JSON.stringify(session.abilitySeed || []);
     session.abilitySeed = _sanitizeAbilitySeed(data.abilitySeed);
+    if (JSON.stringify(session.abilitySeed) !== _prevBuild) {
+      session.buildChangeTick = _live.globalTick || 0;
+      session.loadoutDeltaSendCount = Math.max(session.loadoutDeltaSendCount || 0, 6);
+    }
     if (playerState._ps && playerState._ps.Qz8l93a) {
       Object.assign(playerState._ps.Qz8l93a, computeWeaponStats(session.abilitySeed));
       refreshMagazineCapacity(playerState);   // capacity depends on the stats just applied

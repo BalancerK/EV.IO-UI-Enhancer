@@ -211,7 +211,12 @@ function buildFirstSpawnBody(options = {}) {
     // the menu down immediately and no CLICK TO PLAY overlay could ever appear — the per-tick body
     // saying 3 a moment later was too late to matter.
     91, Number.isFinite(options.playerState) ? options.playerState : 1,
-    93, Array.isArray(options.abilitySeed) ? options.abilitySeed : [],
+    // 93 abilityBuild. To the player themself it is their build, and with none in the join that is the
+    // DEFAULT build: the client leaves the build out when it equals the default, and the ability bar
+    // draws its icons from this array (refreshAbilityIcons) and only allows a cast when
+    // abilityBuild[id] > 0 — an empty array meant no ability icons and no casting. Official sends a
+    // peer [] (getGameStateDiff: "S === e ? build : []").
+    93, ownAbilityBuild(options),
   );
 
   pushStats(body, stats);
@@ -414,12 +419,19 @@ function buildFirstSpawnBody(options = {}) {
 // Spliced into the player's next tick body so the client updates weapon + abilities
 // instantly without a respawn/refresh. Opcode order mirrors buildFirstSpawnBody's loadout
 // section (93, 95-123, 124-135) so the positional decoder reads it correctly.
+// Opcode 93 for this player: [] in a peer's view (official), else their build or the default one.
+function ownAbilityBuild(options) {
+  if (options.peer) return [];
+  return Array.isArray(options.abilitySeed) && options.abilitySeed.length
+    ? options.abilitySeed : DEFAULT_ABILITY_BUILD.slice();
+}
+
 function buildLoadoutDelta(options = {}) {
   const playerId = String(options.playerId ?? "local-player");
   const weaponId = Number.isFinite(options.weaponId) ? options.weaponId : 4;
   const equippedWeaponId = Number.isFinite(options.equippedWeaponId) ? options.equippedWeaponId : weaponId;
-  const weaponStateArray = Array.isArray(options.abilitySeed) ? options.abilitySeed : [];
-  const stats = computeWeaponStats(weaponStateArray.length ? weaponStateArray : DEFAULT_ABILITY_BUILD);
+  const weaponStateArray = ownAbilityBuild(options);
+  const stats = computeWeaponStats(weaponStateArray);
 
   // 91 must carry the player's ACTUAL state, not a hardcoded 1. This delta is spliced into a normal
   // tick body, so a wrong value here is indistinguishable from the real thing — and because the client
@@ -429,7 +441,7 @@ function buildLoadoutDelta(options = {}) {
   // offline join, which sends no loadout RPC, looked perfectly clean.
   const body = [244, playerId, 90, playerId,
     91, Number.isFinite(options.playerState) ? options.playerState : 1];
-  body.push(93, weaponStateArray);
+  body.push(93, weaponStateArray);   // the player's own build (see ownAbilityBuild)
   pushStats(body, stats); // 95-123
   body.push(
     124, "",
@@ -440,17 +452,23 @@ function buildLoadoutDelta(options = {}) {
     129, -1,
     130, -1,
   );
-  // Opcode 235 = clan insignia IMAGE. Clan data arrives on the SOCIAL socket, which connects
-  // independently of (and usually later than) the game join, so it commonly is not known at
-  // bootstrap. Re-emitting it here lets the insignia appear mid-match without a rejoin. Only sent
-  // when known — the client's scoreboard guard treats null as "no clan" and renders nothing.
-  if (typeof options.clan === "string" && options.clan) {
-    body.push(235, options.clan);
-  }
   if (weaponId !== SWORD_WEAPON_ID) {
     body.push(135, weaponId, 132, 999, 133, 30, 134, 0);   // primary (gun) slot
   }
   body.push(135, SWORD_WEAPON_ID, 132, 999999, 133, 999999, 134, 0); // sword slot — always carried
+  // 194 lastTickBuildChange. The client redraws the ability bar ONLY when this changes (or on its
+  // first state), so a build changed mid-match never reached the icons while it stayed -9999999.
+  // Official sets it to the tick of the change.
+  if (Number.isFinite(options.buildChangeTick)) body.push(194, options.buildChangeTick);
+  // Opcode 235 = clan insignia IMAGE. Clan data arrives on the SOCIAL socket, which connects
+  // independently of (and usually later than) the game join, so it commonly is not known at
+  // bootstrap. Re-emitting it here lets the insignia appear mid-match without a rejoin. Only sent
+  // when known — the client's scoreboard guard treats null as "no clan" and renders nothing.
+  // After 135/194: the client reads a player's opcodes in ascending order, so 235 ahead of the
+  // weapon slots made it stop there and read the slots as the next entity.
+  if (typeof options.clan === "string" && options.clan) {
+    body.push(235, options.clan);
+  }
   return body;
 }
 
