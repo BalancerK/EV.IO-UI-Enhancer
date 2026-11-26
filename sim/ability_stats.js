@@ -115,6 +115,14 @@ function computeWeaponStats(weaponStateArray, movementSpeedMod = 1) {
   return stats;
 }
 
+// The build a player has when they never changed it: the client's makeDefaultAbilityObject()
+// (1-7-1 bundle :44324). The client only sends a build when it DIFFERS from this one
+// (signalAbilitiesChange is skipped when it equals the default), so a join that carries none, a
+// guest's for example, means THIS build, not "no abilities". Official servers apply it: their guests
+// get jump power 0.77 and two jumps (Jump level 2), and computeWeaponStats(DEFAULT_ABILITY_BUILD)
+// reproduces all 29 of an official guest's attributes (opcodes 95-123) exactly.
+const DEFAULT_ABILITY_BUILD = Object.freeze([1, 2, 0, 2, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0]);
+
 // abilityTimerN recharge rate from the computed stats (w() in the bundle). Timer0 is a
 // fixed featureFlag (.002); the rest read their weaponStat.
 const TIMER_RATE_STAT = { 1: "Q30g2w8", 2: "Qpe67c9", 3: "Qn97q6u", 4: "Qvhlqt", 5: "Qli8ip8", 6: "Qr55etv" };
@@ -127,6 +135,7 @@ function timerRechargeRate(timerIndex, weaponStats) {
 export {
   baseWeaponStats,
   computeWeaponStats,
+  DEFAULT_ABILITY_BUILD,
   ABILITY_TABLES,
   ABILITY_TIMER,
   ABILITY_COST,

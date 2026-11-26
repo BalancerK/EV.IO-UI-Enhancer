@@ -19362,6 +19362,7 @@ var EvioSim = (() => {
     }
     return stats;
   }
+  var DEFAULT_ABILITY_BUILD = Object.freeze([1, 2, 0, 2, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0]);
 
   // sim/state_builder.js
   var SWORD_WEAPON_ID = 262;
@@ -19481,7 +19482,7 @@ var EvioSim = (() => {
     const emitPositionYOffset = Number.isFinite(options.emitPositionYOffset) ? options.emitPositionYOffset : 0;
     const emittedSpawnY = (spawn.y ?? 2) + emitPositionYOffset;
     const weaponStateArray = Array.isArray(options.abilitySeed) && options.abilitySeed.length ? options.abilitySeed : null;
-    const stats = weaponStateArray ? { ...computeWeaponStats(weaponStateArray), ...options.stats ?? {} } : { ...defaultStats(maxHealth), ...options.stats ?? {} };
+    const stats = weaponStateArray ? { ...computeWeaponStats(weaponStateArray), ...options.stats ?? {} } : { ...computeWeaponStats(DEFAULT_ABILITY_BUILD), ...options.stats ?? {} };
     const mapUrl = String(options.mapUrl ?? "https://ev.io/sites/default/files/maps/HUT8Bishop.evmap");
     const mapName = String(options.mapName ?? "Bishop");
     const mapImageUrl = String(options.mapImageUrl ?? "https://ev.io/sites/default/files/map_thumbs/BishopThumb.png");
@@ -19824,7 +19825,7 @@ var EvioSim = (() => {
     const weaponId = Number.isFinite(options.weaponId) ? options.weaponId : 4;
     const equippedWeaponId = Number.isFinite(options.equippedWeaponId) ? options.equippedWeaponId : weaponId;
     const weaponStateArray = Array.isArray(options.abilitySeed) ? options.abilitySeed : [];
-    const stats = weaponStateArray.length ? computeWeaponStats(weaponStateArray) : defaultStats();
+    const stats = computeWeaponStats(weaponStateArray.length ? weaponStateArray : DEFAULT_ABILITY_BUILD);
     const body = [
       244,
       playerId,
@@ -31287,6 +31288,10 @@ var EvioSim = (() => {
                   console.log(`[evio-local] applied loadout stats: array=[${session.abilitySeed.join(",")}]`);
                   console.log(`[evio-local]   sprintLvl=${session.abilitySeed[2] || 0} -> staminaDrain Qbypopp=${playerState._ps.Qz8l93a.Qbypopp} (base .006); jumpPwr=${playerState._ps.Qz8l93a.Qfh4lso} maxJumps=${playerState._ps.Qz8l93a.Q7v2lyo} switchDelay=${playerState._ps.Qz8l93a.Qhswtsz} teleLvl=${session.abilitySeed[0] || 0}`);
                 }
+              } else if (playerState._ps && playerState._ps.Qz8l93a) {
+                Object.assign(playerState._ps.Qz8l93a, computeWeaponStats(DEFAULT_ABILITY_BUILD));
+                refreshMagazineCapacity(playerState);
+                playerState._ps.weaponStateArray = DEFAULT_ABILITY_BUILD.slice();
               }
               playerState.equippedWeaponId = session.weaponId;
               playerState.backupWeaponId = -1;

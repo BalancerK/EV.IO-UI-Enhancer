@@ -19,7 +19,7 @@ const path = {
 };
 import { encode, decode } from "./msgpack/index.mjs";
 import { buildStatePacket, buildFirstSpawnBody, buildLoadoutDelta } from "./state_builder.js";
-import { computeWeaponStats, ABILITY_COST, ABILITY_TIMER, ABILITY_TABLES } from "./ability_stats.js";
+import { computeWeaponStats, ABILITY_COST, ABILITY_TIMER, ABILITY_TABLES, DEFAULT_ABILITY_BUILD } from "./ability_stats.js";
 import cachedWeaponsData from "./weapons.json";
 
 // The ability array (Q3i8qs3, opcode 93) is INDEXED BY ABILITY ID and the ids run 0..16 — so it needs
@@ -11926,6 +11926,15 @@ function startServer() {
                 console.log(`[evio-local] applied loadout stats: array=[${session.abilitySeed.join(",")}]`);
                 console.log(`[evio-local]   sprintLvl=${session.abilitySeed[2] || 0} -> staminaDrain Qbypopp=${playerState._ps.Qz8l93a.Qbypopp} (base .006); jumpPwr=${playerState._ps.Qz8l93a.Qfh4lso} maxJumps=${playerState._ps.Qz8l93a.Q7v2lyo} switchDelay=${playerState._ps.Qz8l93a.Qhswtsz} teleLvl=${session.abilitySeed[0] || 0}`);
               }
+            } else if (playerState._ps && playerState._ps.Qz8l93a) {
+              // No build in the join = the DEFAULT build (see DEFAULT_ABILITY_BUILD), which is what the
+              // bootstrap's stats now describe too. The physics used to keep its zero-point base (jump
+              // 0.6, one jump) while the bootstrap said 0.77 / one jump and official says 0.77 / two:
+              // guests could not double jump, and every jump was corrected back down. session.abilitySeed
+              // stays unset, so opcode 93 still reports the empty build the client sent, as official does.
+              Object.assign(playerState._ps.Qz8l93a, computeWeaponStats(DEFAULT_ABILITY_BUILD));
+              refreshMagazineCapacity(playerState);
+              playerState._ps.weaponStateArray = DEFAULT_ABILITY_BUILD.slice();
             }
             // Initialise the sim weapon state from the real loadout: the player carries
             // the primary gun + the sword (262, matching state_builder's weaponSlots),

@@ -2,7 +2,7 @@
 
 // Ported for the browser-extension host (see sim/README.md) — require/module.exports swapped
 // for ES import/export, nothing else changed. Same packet-building logic the Node server uses.
-import { computeWeaponStats } from "./ability_stats.js";
+import { computeWeaponStats, DEFAULT_ABILITY_BUILD } from "./ability_stats.js";
 
 // Builds local-only server->client MessagePack state packets for the ev.io
 // interoperability prototype. Values here are conservative placeholders based
@@ -127,13 +127,14 @@ function buildFirstSpawnBody(options = {}) {
   // (weaponStateArray / field_abilities_loadout, also emitted as opcode 93), compute the
   // real per-loadout stats — base feature-flag values + Qusynxe ability modifiers — so
   // jump/sprint/teleport/switch/reload reflect the chosen abilities instead of a fixed
-  // capture. With no array we fall back to the legacy defaultStats (= the default loadout).
+  // capture. With no array the player has the DEFAULT build (see DEFAULT_ABILITY_BUILD): the client
+  // only sends a build that differs from it. Opcode 93 still carries what was sent ([] for none).
   const weaponStateArray = Array.isArray(options.abilitySeed) && options.abilitySeed.length
     ? options.abilitySeed
     : null;
   const stats = weaponStateArray
     ? { ...computeWeaponStats(weaponStateArray), ...(options.stats ?? {}) }
-    : { ...defaultStats(maxHealth), ...(options.stats ?? {}) };
+    : { ...computeWeaponStats(DEFAULT_ABILITY_BUILD), ...(options.stats ?? {}) };
   const mapUrl = String(options.mapUrl ?? "https://ev.io/sites/default/files/maps/HUT8Bishop.evmap");
   const mapName = String(options.mapName ?? "Bishop");
   const mapImageUrl = String(options.mapImageUrl ?? "https://ev.io/sites/default/files/map_thumbs/BishopThumb.png");
@@ -418,7 +419,7 @@ function buildLoadoutDelta(options = {}) {
   const weaponId = Number.isFinite(options.weaponId) ? options.weaponId : 4;
   const equippedWeaponId = Number.isFinite(options.equippedWeaponId) ? options.equippedWeaponId : weaponId;
   const weaponStateArray = Array.isArray(options.abilitySeed) ? options.abilitySeed : [];
-  const stats = weaponStateArray.length ? computeWeaponStats(weaponStateArray) : defaultStats();
+  const stats = computeWeaponStats(weaponStateArray.length ? weaponStateArray : DEFAULT_ABILITY_BUILD);
 
   // 91 must carry the player's ACTUAL state, not a hardcoded 1. This delta is spliced into a normal
   // tick body, so a wrong value here is indistinguishable from the real thing — and because the client
