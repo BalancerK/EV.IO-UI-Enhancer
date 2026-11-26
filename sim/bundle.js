@@ -24627,7 +24627,7 @@ var EvioSim = (() => {
       victimIsBoss: !!(victimSession && victimSession.isBoss)
     });
     if (LASTHITINFO_EVENTS) {
-      victim._pendingHit = {
+      victim._lastHitWire = victim._pendingHit = {
         attackerSid: ownerSid,
         dmg: round(damage, 4),
         wpnType: weaponType,
@@ -25246,7 +25246,7 @@ var EvioSim = (() => {
   }
   var _pendingBullets = [];
   var _bulletIdCounter = 1;
-  function spawnBullet(ownerSid, origin, dir, dmg, weaponType) {
+  function spawnBullet(ownerSid, origin, dir, dmg, weaponType, multiProjectileIndex = 0) {
     _pendingBullets.push({
       id: _bulletIdCounter++,
       owner: ownerSid,
@@ -25257,7 +25257,8 @@ var EvioSim = (() => {
       dy: dir.y,
       dz: dir.z,
       dmg,
-      wpn: weaponType
+      wpn: weaponType,
+      mpi: multiProjectileIndex
     });
     if (_pendingBullets.length > 256) _pendingBullets.splice(0, _pendingBullets.length - 256);
   }
@@ -25285,6 +25286,12 @@ var EvioSim = (() => {
         round(b2.dz, 4),
         51,
         round(b2.dmg, 4),
+        // 53 multiProjectileIndex: the pellet number (0 for a single-bullet shot). The client plays a
+        // peer's SHOOT sound only for `0 === multiProjectileIndex` (bundle :57014) and the bullet's
+        // impact / die sounds only for `<= 2` (:61207-61209). Never sent, it decoded as undefined, so
+        // nobody ever heard anyone else's gunfire or bullet impacts on our servers. Official sends it.
+        53,
+        b2.mpi | 0,
         54,
         b2.wpn
       );
@@ -25781,6 +25788,7 @@ var EvioSim = (() => {
     recordDamager(victim, attacker);
     if (victim.healthPoints <= 0 && victim.deathStateTimer <= 0) {
       victim.deathStateTimer = 1;
+      victim._deathTick = _live.globalTick || 0;
       victim.killStreak = 0;
       if (attacker && attacker !== victim) {
         attacker.multiKill = attacker.ticksSinceKill < MULTIKILL_WINDOW ? (attacker.multiKill || 1) + 1 : 1;
@@ -26082,7 +26090,7 @@ var EvioSim = (() => {
       victimIsBoss: !!(victimSession && victimSession.isBoss)
     });
     if (LASTHITINFO_EVENTS) {
-      victim._pendingHit = {
+      victim._lastHitWire = victim._pendingHit = {
         attackerSid: shooter._ownerSid,
         dmg: round(damage, 4),
         wpnType: shooter.equippedWeaponId,
@@ -26291,7 +26299,7 @@ var EvioSim = (() => {
     for (let i2 = 0; i2 < offs.length; i2++) {
       const dir = _pelletDir(offs[i2], aim.yaw, aim.pitch);
       const hit = withLagComp(shooter, sessions, () => physics_extracted_default.hitscanPlayers(physics_world_default.world, eye.x, eye.y, eye.z, dir.x, dir.y, dir.z, ps2.Q7q6byi));
-      spawnBullet(shooter._ownerSid, eye, dir, bd2 > 0 ? bd2 * DMG_GLOBAL_MULT * LOBBY_DAMAGE_MULT : 0, nid);
+      spawnBullet(shooter._ownerSid, eye, dir, bd2 > 0 ? bd2 * DMG_GLOBAL_MULT * LOBBY_DAMAGE_MULT : 0, nid, i2);
       applyHit(shooter, sessions, hit, eye, parsed ? `${i2}:${parsed.suffix}` : clientRay && clientRay.sid);
     }
     destroyMineInLineOfFire(eye, fwd, sessions);
@@ -27027,6 +27035,7 @@ var EvioSim = (() => {
       p2.ticksSinceKill = 99999;
       p2.forceRegen = false;
       if (p2._damagedBy) p2._damagedBy.clear();
+      p2._lastHitWire = null;
       _clearAllPickupWeapons(p2);
       p2.gunAmmo = weaponClip(p2._ammoGunId, p2);
       p2.reloadTicks = 0;
@@ -28321,6 +28330,11 @@ var EvioSim = (() => {
     _tickPlayerBlockCache.set(cacheKey, entry);
     return entry;
   }
+  function deathWireTicks(playerState) {
+    const dead = playerState.deathStateTimer > 0 || playerState.healthPoints <= 0;
+    if (!dead || !Number.isFinite(playerState._deathTick)) return null;
+    return Math.max(0, (_live.globalTick || 0) - playerState._deathTick);
+  }
   function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState()) {
     const wallN = playerState.wallNormal || { x: 0, y: 0, z: 0 };
     const HELD_ORIGIN = { x: 0, y: 0, z: 0 };
@@ -28359,7 +28373,7 @@ var EvioSim = (() => {
       // A player waiting to join uses 3, not 4: 3 is the one that shows CLICK TO PLAY together with the
       // [ SPECTATE ] button (:61820), which is the arrival screen. 4 would read as "you died".
       91,
-      playerState._holdForPlay ? playerState._spectating ? 2 : PLAYER_STATE_HELD : playerState.deathStateTimer > 0 || playerState.healthPoints <= 0 ? 4 : 1,
+      playerState._holdForPlay ? playerState._spectating ? 2 : PLAYER_STATE_HELD : playerState.deathStateTimer > 0 || playerState.healthPoints <= 0 ? deathWireTicks(playerState) === 0 ? 1 : 4 : 1,
       // 95 Qz8l93a.Qtgt1xt — MAX health, the divisor for the peer health bar (bundle :52501 does
       // `m /= c.Qz8l93a.Qtgt1xt`). The first-spawn body sends it, but the 244 tick loop recreates a
       // missing peer as a BARE object (`w in playerList || (playerList[w] = {})`) with no Qz8l93a
@@ -28378,7 +28392,8 @@ var EvioSim = (() => {
       );
     }
     const _dead = playerState.deathStateTimer > 0 || playerState.healthPoints <= 0;
-    body.push(129, _dead ? Math.max(0, RESPAWN_TICKS - playerState.deathStateTimer) : playerState.switchTimer > 0 ? playerState.switchTimer : -1);
+    void _dead;
+    body.push(129, playerState.switchTimer > 0 ? playerState.switchTimer : -1);
     body.push(130, playerState.reloadTicks > 0 ? playerState.reloadTicks : -1);
     const _gunId = held ? null : playerState._ammoGunId;
     if (!held) {
@@ -28486,8 +28501,14 @@ var EvioSim = (() => {
       // 150 ticksSinceLastDeath — 0 on the death tick. Only read by the ragdoll code, which holds
       // the body for 22 ticks when the killing weapon has shockDeath (Trip Mine); a constant 9999
       // skipped that. deathStateTimer is 1 on the death tick, hence the -1.
+      // Official keeps counting after the respawn rather than going back to 9999 (getKilled sets it
+      // to 0 and nothing else resets it); 9999 only before a first death.
       150,
-      playerState.deathStateTimer > 0 ? playerState.deathStateTimer - 1 : 9999,
+      (() => {
+        const d2 = deathWireTicks(playerState);
+        if (d2 !== null) return d2;
+        return Number.isFinite(playerState._deathTick) ? Math.max(0, (_live.globalTick || 0) - playerState._deathTick) : 9999;
+      })(),
       151,
       playerState.slideBoostTick || 0,
       // 155/156 Qcqglqd/Qte59p5 — player model scale. See SURVIVAL_BOSS_SCALE's own comment.
@@ -28536,7 +28557,10 @@ var EvioSim = (() => {
       168,
       Math.max(
         0,
-        Number.isFinite(playerState.deathStateTimer) ? playerState.deathStateTimer : 0,
+        (() => {
+          const d2 = deathWireTicks(playerState);
+          return d2 !== null ? d2 : Number.isFinite(playerState.deathStateTimer) ? playerState.deathStateTimer : 0;
+        })(),
         intermissionFreezeTicks()
       ),
       ...playerState._pendingHit ? [
@@ -28558,6 +28582,14 @@ var EvioSim = (() => {
         round(playerState._pendingHit.src.y),
         round(playerState._pendingHit.src.z)
       ] : [
+        170,
+        playerState._lastHitWire ? playerState._lastHitWire.attackerSid : "",
+        171,
+        playerState._lastHitWire ? playerState._lastHitWire.dmg : 0,
+        172,
+        playerState._lastHitWire ? playerState._lastHitWire.wpnType : null,
+        173,
+        playerState._lastHitWire ? !!playerState._lastHitWire.headshot : false,
         175,
         !!playerState.forceRegen
       ],
@@ -29231,6 +29263,7 @@ var EvioSim = (() => {
       p2.armorPoints = 0;
       p2.deathStateTimer = 0;
       p2.fireCooldown = 0;
+      p2._lastHitWire = null;
       _clearAllPickupWeapons(p2);
       p2.gunAmmo = weaponClip(p2._ammoGunId, p2);
       p2.reloadTicks = 0;
@@ -31160,6 +31193,7 @@ var EvioSim = (() => {
         playerState._ps.weaponStateArray = abilitySeed;
       }
       if (Number.isFinite(opts.modelScale)) playerState.modelScale = opts.modelScale;
+      playerState.isBot = true;
       const session = {
         ws: null,
         isBot: true,

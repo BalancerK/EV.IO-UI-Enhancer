@@ -2920,7 +2920,7 @@ function dealGrenadeHit(victim, ownerSid, damage, weaponType, srcPos, sessions) 
     victimIsBoss: !!(victimSession && victimSession.isBoss),
   });
   if (LASTHITINFO_EVENTS) {
-    victim._pendingHit = {
+    victim._lastHitWire = victim._pendingHit = {
       attackerSid: ownerSid, dmg: round(damage, 4),
       wpnType: weaponType, headshot: false,
       src: { x: srcPos.x, y: srcPos.y, z: srcPos.z },
@@ -3656,11 +3656,11 @@ function flushActiveEntities(body) {
 // Filled by spawnBullet() in fireHitscan, emitted by buildBulletBlock(), cleared after broadcast.
 const _pendingBullets = [];
 let _bulletIdCounter = 1;
-function spawnBullet(ownerSid, origin, dir, dmg, weaponType) {
+function spawnBullet(ownerSid, origin, dir, dmg, weaponType, multiProjectileIndex = 0) {
   _pendingBullets.push({
     id: _bulletIdCounter++, owner: ownerSid,
     ox: origin.x, oy: origin.y, oz: origin.z, dx: dir.x, dy: dir.y, dz: dir.z,
-    dmg: dmg, wpn: weaponType,
+    dmg: dmg, wpn: weaponType, mpi: multiProjectileIndex,
   });
   if (_pendingBullets.length > 256) _pendingBullets.splice(0, _pendingBullets.length - 256);
 }
@@ -3675,6 +3675,11 @@ function buildBulletBlock() {
       49, 0, round(b.ox), round(b.oy), round(b.oz),
       50, 0, round(b.dx, 4), round(b.dy, 4), round(b.dz, 4),
       51, round(b.dmg, 4),
+      // 53 multiProjectileIndex: the pellet number (0 for a single-bullet shot). The client plays a
+      // peer's SHOOT sound only for `0 === multiProjectileIndex` (bundle :57014) and the bullet's
+      // impact / die sounds only for `<= 2` (:61207-61209). Never sent, it decoded as undefined, so
+      // nobody ever heard anyone else's gunfire or bullet impacts on our servers. Official sends it.
+      53, b.mpi | 0,
       54, b.wpn,
     );
   }
@@ -4145,6 +4150,8 @@ function applyDamage(victim, amount, attacker, opts) {
   recordDamager(victim, attacker);
   if (victim.healthPoints <= 0 && victim.deathStateTimer <= 0) {
     victim.deathStateTimer = 1;
+    // The server tick of the kill, for what the client is told (see deathWireTicks).
+    victim._deathTick = _live.globalTick || 0;
     victim.killStreak = 0;   // dying ends the streak (bundle :34440)
     // The KILLER's post-kill regen window starts here (bundle :34437 sets Qezc1on = 0).
     if (attacker && attacker !== victim) {
@@ -4570,7 +4577,7 @@ function applyHit(shooter, sessions, hit, eye, shotSid) {
   // Hit feedback, split into two independently-gated channels to bisect the on-hit model flicker.
   // HP/damage always applies regardless.
   if (LASTHITINFO_EVENTS) {
-    victim._pendingHit = {
+    victim._lastHitWire = victim._pendingHit = {
       attackerSid: shooter._ownerSid, dmg: round(damage, 4),
       wpnType: shooter.equippedWeaponId, headshot: !!hit.headshot, src: { x: eye.x, y: eye.y, z: eye.z },
     };
@@ -4858,7 +4865,7 @@ function fireShotgunPellets(shooter, sessions, clientRay) {
     const dir = _pelletDir(offs[i], aim.yaw, aim.pitch);
     const hit = withLagComp(shooter, sessions, () =>
       phys.hitscanPlayers(bpw.world, eye.x, eye.y, eye.z, dir.x, dir.y, dir.z, ps.Q7q6byi));
-    spawnBullet(shooter._ownerSid, eye, dir, (bd > 0 ? bd * DMG_GLOBAL_MULT * LOBBY_DAMAGE_MULT : 0), nid);
+    spawnBullet(shooter._ownerSid, eye, dir, (bd > 0 ? bd * DMG_GLOBAL_MULT * LOBBY_DAMAGE_MULT : 0), nid, i);
     applyHit(shooter, sessions, hit, eye, parsed ? `${i}:${parsed.suffix}` : (clientRay && clientRay.sid));
   }
   destroyMineInLineOfFire(eye, fwd, sessions);
@@ -5973,6 +5980,7 @@ function respawnPlayerNow(p) {
       p.healthPoints = 1; p.armorPoints = 0; p.deathStateTimer = 0; p.fireCooldown = 0;
       p.ticksSinceDamage = 99999; p.ticksSinceKill = 99999; p.forceRegen = false;
       if (p._damagedBy) p._damagedBy.clear();   // the damage log is per-life
+      p._lastHitWire = null;   // official clears the last-hit fields (170-173) on respawn
       // A pickup weapon NEVER survives death (official behaviour), every slot at once — cleared
       // before the primary-restore check below so weaponList[0] is unambiguously the primary again.
       _clearAllPickupWeapons(p);
@@ -7761,6 +7769,16 @@ function _cachedPlayerBlock(playerId, playerState, tick, variant = "self") {
   return entry;
 }
 
+// Ticks since this player was killed, as official reports it (shared sim, PlayerState.getKilled +
+// tick): the killing tick itself is 0 — health 0, still joinState 1, ticksSinceLastDeath 0 — and
+// from the next tick joinState 4 with deadCounter 1, 2, 3... We used to show joinState 4 and
+// deadCounter 2 on the killing tick, one tick early on both, because deathStateTimer starts at 1 on
+// the kill and is advanced again before the tick is sent. null = not dead / no recorded death.
+function deathWireTicks(playerState) {
+  const dead = playerState.deathStateTimer > 0 || playerState.healthPoints <= 0;
+  if (!dead || !Number.isFinite(playerState._deathTick)) return null;
+  return Math.max(0, (_live.globalTick || 0) - playerState._deathTick);
+}
 function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState()) {
   // Zero unless the player wall-jumped this tick (see the copy-back in the physics step).
   const wallN = playerState.wallNormal || { x: 0, y: 0, z: 0 };
@@ -7815,7 +7833,7 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       // A player waiting to join uses 3, not 4: 3 is the one that shows CLICK TO PLAY together with the
       // [ SPECTATE ] button (:61820), which is the arrival screen. 4 would read as "you died".
       91, playerState._holdForPlay ? (playerState._spectating ? 2 : PLAYER_STATE_HELD)
-        : (playerState.deathStateTimer > 0 || playerState.healthPoints <= 0) ? 4 : 1,
+        : (playerState.deathStateTimer > 0 || playerState.healthPoints <= 0) ? (deathWireTicks(playerState) === 0 ? 1 : 4) : 1,
       // 95 Qz8l93a.Qtgt1xt — MAX health, the divisor for the peer health bar (bundle :52501 does
       // `m /= c.Qz8l93a.Qtgt1xt`). The first-spawn body sends it, but the 244 tick loop recreates a
       // missing peer as a BARE object (`w in playerList || (playerList[w] = {})`) with no Qz8l93a
@@ -7848,9 +7866,12 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
   // While DEAD the countdown is kept: it is what the client's death-cam dip reads, and a dead
   // player cannot fire anyway, so the firing gate is moot there.
   const _dead = playerState.deathStateTimer > 0 || playerState.healthPoints <= 0;
-  body.push(129, _dead
-    ? Math.max(0, RESPAWN_TICKS - playerState.deathStateTimer)
-    : (playerState.switchTimer > 0 ? playerState.switchTimer : -1));
+  // Not a respawn countdown while dead, as it used to be: official does not send 129 then, and
+  // counting it down through weaponSwitchDurationTicks made the client play the switch-weapon
+  // sound once during every death (bundle :57051) and dip the first-person weapon. The death view
+  // comes from deadCounter (168).
+  void _dead;
+  body.push(129, playerState.switchTimer > 0 ? playerState.switchTimer : -1);
   // 130 reloadTimer — the authoritative reload countdown (>0 while reloading, -1 otherwise). Streaming
   // it stops the client from running its OWN reload + reconciling our empty mag back to 0 every tick
   // (the "reloading loop"); the client's reload-start gate is `reloadTimer<1` (:43981). Before 135/136.
@@ -8001,7 +8022,10 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       // 150 ticksSinceLastDeath — 0 on the death tick. Only read by the ragdoll code, which holds
       // the body for 22 ticks when the killing weapon has shockDeath (Trip Mine); a constant 9999
       // skipped that. deathStateTimer is 1 on the death tick, hence the -1.
-      150, playerState.deathStateTimer > 0 ? playerState.deathStateTimer - 1 : 9999,
+      // Official keeps counting after the respawn rather than going back to 9999 (getKilled sets it
+      // to 0 and nothing else resets it); 9999 only before a first death.
+      150, (() => { const d = deathWireTicks(playerState); if (d !== null) return d;
+        return Number.isFinite(playerState._deathTick) ? Math.max(0, (_live.globalTick || 0) - playerState._deathTick) : 9999; })(),
       151, playerState.slideBoostTick || 0,
       // 155/156 Qcqglqd/Qte59p5 — player model scale. See SURVIVAL_BOSS_SCALE's own comment.
       155, Number.isFinite(playerState.modelScale) ? playerState.modelScale : 1,
@@ -8035,7 +8059,8 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       // neither. Peer animation also pauses (:52351), which is what "everyone freezes" should look like.
       168, Math.max(
         0,
-        Number.isFinite(playerState.deathStateTimer) ? playerState.deathStateTimer : 0,
+        (() => { const d = deathWireTicks(playerState); return d !== null ? d
+          : (Number.isFinite(playerState.deathStateTimer) ? playerState.deathStateTimer : 0); })(),
         intermissionFreezeTicks(),
       ),
       // 170-176: lastHitInfo — emitted ONLY the tick a player is hit (then cleared after broadcast),
@@ -8052,7 +8077,9 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
       // It has to be interleaved into the _pendingHit block rather than emitted after it: the decoder
       // is one ascending scan and 175 sits between 174 and 176, so appending it after 176 would stall
       // the cursor on any tick a player was hit.
-      ...(playerState._pendingHit ? [
+      // 170-173 stay at the last hit until the player respawns, as official does (it clears them to
+      // "", 0, null, false on respawn). The field filter keeps the repeats off the wire.
+      ...(playerState._pendingHit ? ([
         170, playerState._pendingHit.attackerSid,
         171, playerState._pendingHit.dmg,
         172, playerState._pendingHit.wpnType,
@@ -8060,7 +8087,11 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
         174, 0,
         175, !!playerState.forceRegen,
         176, 0, round(playerState._pendingHit.src.x), round(playerState._pendingHit.src.y), round(playerState._pendingHit.src.z),
-      ] : [
+      ]) : [
+        170, playerState._lastHitWire ? playerState._lastHitWire.attackerSid : "",
+        171, playerState._lastHitWire ? playerState._lastHitWire.dmg : 0,
+        172, playerState._lastHitWire ? playerState._lastHitWire.wpnType : null,
+        173, playerState._lastHitWire ? !!playerState._lastHitWire.headshot : false,
         175, !!playerState.forceRegen,
       ]),
       // 185: Qcdx4mh (isDancing) — always false on our server (no emote actions)
@@ -9016,6 +9047,7 @@ function respawnAll(sessions) {
     const p = s.playerState;
     p.kills = 0; p.deaths = 0; p.score = 0; p.assists = 0; p.botKills = 0; p.bossKills = 0; p.revives = 0; p.killStreak = 0; p.multiKill = 0;
     p.healthPoints = 1; p.armorPoints = 0; p.deathStateTimer = 0; p.fireCooldown = 0;
+    p._lastHitWire = null;   // new round: last-hit fields cleared, as on a respawn
     // Same reasoning as respawnPlayerNow: pickup weapons never survive a reset, all slots at once.
     // Unlike that path, this loop has no separate primary-restore fixup, so
     // _clearAllPickupWeapons's own wasEquipped branch is what puts the player back on their
@@ -11502,6 +11534,10 @@ function startServer() {
     // Opcode 155/156 — see SURVIVAL_BOSS_SCALE's own comment. Only the boss gets a non-default
     // scale; every other bot stays the createPlayerSimState default of 1.
     if (Number.isFinite(opts.modelScale)) playerState.modelScale = opts.modelScale;
+    // Scoring reads the VICTIM's player state (medalScore, the bot-kill counter 219), not its
+    // session, so the flag has to be here too. Without it the official 0.3 bot multiplier never
+    // applied: every bot kill paid 100 where official pays 30, and 219 never counted.
+    playerState.isBot = true;
 
     const session = {
       ws: null,
