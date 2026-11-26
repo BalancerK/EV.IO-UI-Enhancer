@@ -2676,6 +2676,14 @@ const GRENADE_GRAVITY_BY_TYPE = {
 const grenadeGravity = (type) =>
   (GRENADE_GRAVITY_BY_TYPE[type] !== undefined ? GRENADE_GRAVITY_BY_TYPE[type] : GRENADE_GRAVITY)
   * GRENADE_GRAVITY_MULT;
+// Per-tick speed gain, in OUR units (u/s added per 0.05 s tick). The catalogue's
+// projectileAcceleration is in the client's u/tick per tick (Rocket Launcher: 0.033, so a rocket
+// leaves at 1.4 u/tick and is at ~2.06 u/tick a second later), and u/tick -> u/s is x20. 0 = none.
+const PROJECTILE_ACCEL = _weaponDataMap("projectileAcceleration");
+const projectileAcceleration = (type) => {
+  const a = PROJECTILE_ACCEL[type];
+  return Number.isFinite(a) && a !== 0 ? a * 20 : 0;
+};
 
 // Bounce, ported from the client's Q5vtwm(vel, normal, 0.5, 0.9) (bundle, called at the wall-hit
 // branch of the projectile tick). It is NOT a uniform restitution: the velocity is split against
@@ -3398,7 +3406,7 @@ function stepEntity(key, g, dt, sessions) {
       return;
     }
     if (g.isStuck || g.settled) return;   // resting grenades neither move nor re-collide
-    g.vel.y -= grenadeGravity(g.type) * dt;
+    // (gravity + acceleration are applied at the END of this step, after the move — see there)
     const dx = g.vel.x * dt, dy = g.vel.y * dt, dz = g.vel.z * dt;
     const dist = Math.hypot(dx, dy, dz);
     let detonate = false;
@@ -3526,6 +3534,22 @@ function stepEntity(key, g, dt, sessions) {
             g.tripLen = tripLen;
             g.ray = { ox: g.pos.x, oy: g.pos.y, oz: g.pos.z, dx: nx, dy: ny, dz: nz };
           }
+        }
+      }
+    }
+    // Gravity and acceleration come AFTER the move, as in the client's ProjectileState.tick (1-7-1
+    // bundle :54574-54576: move by vec, resolve contact, then `vec.y -= gravity`, then
+    // `vec.setLength(len + projectileAcceleration)`). Applying gravity before the move, as this used
+    // to, ran every arc one tick of gravity ahead of official: ~1u low after 1 s, ~2u by the time an
+    // HE grenade's 2 s fuse ran out. Nothing that has stuck or come to rest is pulled any further.
+    if (!g.isStuck && !g.settled) {
+      g.vel.y -= grenadeGravity(g.type) * dt;
+      const acc = projectileAcceleration(g.type);
+      if (acc) {
+        const sp = Math.hypot(g.vel.x, g.vel.y, g.vel.z);
+        if (sp > 1e-9) {
+          const k = (sp + acc * (dt / 0.05)) / sp;
+          g.vel.x *= k; g.vel.y *= k; g.vel.z *= k;
         }
       }
     }
@@ -8026,6 +8050,11 @@ function buildTickBody(playerId, tick, playerState = createPlayerSimState(), pee
     header.set(18, currentMapThumb());
     header.set(19, currentMapName());
   }
+  // 25 roomParams.ambientURL = the map's background sound. The client plays it once you are in the
+  // match (bundle :57117) and stops it when the URL changes or goes empty; official sends it for
+  // every map that has one. We never did, so no map ever had its ambience. Always a string: the
+  // client calls .includes() on it.
+  header.set(25, currentMapAmbient());
   header.set(37, true);
   // 42 Qdh8um3 = matchDuration = TICKS PER SECOND (20). The client already defaults it to 20 and
   // the official server never sends it; this only matters at a non-20Hz tick rate.
@@ -8630,6 +8659,23 @@ function currentMapThumb() {
     if (m && m.thumbUrl) return m.thumbUrl;
   } catch { /* catalogue unavailable — use the built-in default */ }
   return "https://ev.io/sites/default/files/map_thumbs/BishopThumb.png";
+}
+
+// Opcode 25 — the current map's ambient track from the catalogue, or "" for none (uploaded custom
+// maps and test maps have none). Remembered per map URL: findMap lists the custom-maps folder on
+// every call, and this runs every tick.
+const _ambientMemo = { url: null, value: "" };
+function currentMapAmbient() {
+  const url = currentMapUrl();
+  if (_ambientMemo.url === url) return _ambientMemo.value;
+  let value = "";
+  try {
+    const m = mapLoader.findMap(url);
+    if (m && typeof m.ambientUrl === "string") value = m.ambientUrl;
+  } catch { /* catalogue unavailable */ }
+  _ambientMemo.url = url;
+  _ambientMemo.value = value;
+  return value;
 }
 
 // Advance to the next map and bump the generation so clients reload. Returns true if the map

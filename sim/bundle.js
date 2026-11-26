@@ -22001,6 +22001,9 @@ var EvioSim = (() => {
         evmapUrl,
         thumbUrl: fileUrl(r2.field_map_thumbnail),
         largeImageUrl: fileUrl(r2.field_large_image),
+        // The map's background sound (ambient_tracks/*.ogg), which official sends as
+        // roomParams.ambientURL (opcode 25). 23 of the 51 catalogue maps have one.
+        ambientUrl: fileUrl(r2.field_ambient_track),
         inRotation: a2.field_in_public_rotation !== false
       });
     }
@@ -24431,6 +24434,11 @@ var EvioSim = (() => {
     8: 0
   };
   var grenadeGravity = (type) => (GRENADE_GRAVITY_BY_TYPE[type] !== void 0 ? GRENADE_GRAVITY_BY_TYPE[type] : GRENADE_GRAVITY) * GRENADE_GRAVITY_MULT;
+  var PROJECTILE_ACCEL = _weaponDataMap("projectileAcceleration");
+  var projectileAcceleration = (type) => {
+    const a2 = PROJECTILE_ACCEL[type];
+    return Number.isFinite(a2) && a2 !== 0 ? a2 * 20 : 0;
+  };
   var GRENADE_BOUNCE_RESTITUTION = 0.5;
   var GRENADE_BOUNCE_FRICTION = 0.9;
   function bounceVelocity(vel, nx, ny, nz) {
@@ -25018,7 +25026,6 @@ var EvioSim = (() => {
         return;
       }
       if (g2.isStuck || g2.settled) return;
-      g2.vel.y -= grenadeGravity(g2.type) * dt2;
       const dx = g2.vel.x * dt2, dy = g2.vel.y * dt2, dz = g2.vel.z * dt2;
       const dist = Math.hypot(dx, dy, dz);
       let detonate = false;
@@ -25130,6 +25137,19 @@ var EvioSim = (() => {
               g2.tripLen = tripLen;
               g2.ray = { ox: g2.pos.x, oy: g2.pos.y, oz: g2.pos.z, dx: nx, dy: ny, dz: nz };
             }
+          }
+        }
+      }
+      if (!g2.isStuck && !g2.settled) {
+        g2.vel.y -= grenadeGravity(g2.type) * dt2;
+        const acc = projectileAcceleration(g2.type);
+        if (acc) {
+          const sp2 = Math.hypot(g2.vel.x, g2.vel.y, g2.vel.z);
+          if (sp2 > 1e-9) {
+            const k2 = (sp2 + acc * (dt2 / 0.05)) / sp2;
+            g2.vel.x *= k2;
+            g2.vel.y *= k2;
+            g2.vel.z *= k2;
           }
         }
       }
@@ -28328,6 +28348,7 @@ var EvioSim = (() => {
       header.set(18, currentMapThumb());
       header.set(19, currentMapName());
     }
+    header.set(25, currentMapAmbient());
     header.set(37, true);
     header.set(42, Math.max(1, Math.round(1e3 / TICK_MS)));
     const body = [];
@@ -28728,6 +28749,20 @@ var EvioSim = (() => {
     } catch {
     }
     return "https://ev.io/sites/default/files/map_thumbs/BishopThumb.png";
+  }
+  var _ambientMemo = { url: null, value: "" };
+  function currentMapAmbient() {
+    const url = currentMapUrl();
+    if (_ambientMemo.url === url) return _ambientMemo.value;
+    let value = "";
+    try {
+      const m2 = findMap(url);
+      if (m2 && typeof m2.ambientUrl === "string") value = m2.ambientUrl;
+    } catch {
+    }
+    _ambientMemo.url = url;
+    _ambientMemo.value = value;
+    return value;
   }
   function advanceMap() {
     const rot = mapRotation();
