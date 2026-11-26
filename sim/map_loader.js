@@ -211,6 +211,65 @@ async function loadMap(idOrTitleOrUrl) {
   return { ...entry, fromCache, buildMs };
 }
 
+// ── Test maps ────────────────────────────────────────────────────────────────────────────────
+// Same rules as the Node server's map_loader.js: an uploaded .evmap lives ONLY in memory — never in
+// Cache Storage, never in the world cache, never in listMaps()/findMap() — and is dropped as soon as
+// another map is loaded. Its URL is a placeholder no browser can fetch on its own: the extension's
+// page hook (page-socket-hook.js) recognises /maps/test/<key>.evmap and gets the bytes from this
+// host — directly for the host's own tab, over the lobby's reliable WebRTC channel for everyone
+// else (background.js) — so nothing is ever uploaded anywhere.
+const TEST_MAP_MAX_BYTES = 32 * 1024 * 1024;
+const TEST_MAP_ORIGIN = 'https://evio-test-map.invalid';
+const TEST_KEY_RE = /^[0-9a-f]{32}$/;
+let _testMap = null;   // { key, name, buf, size } while a test map is the active map
+
+function testMapUrl(key) { return `${TEST_MAP_ORIGIN}/maps/test/${key}.evmap`; }
+
+function testMapName(name) {
+  const base = String(name || '').split(/[\\/]/).pop().replace(/\.evmap$/i, '')
+    .replace(/[^\p{L}\p{N} ._'()-]+/gu, ' ').replace(/[\s_]+/g, ' ').trim().slice(0, 48);
+  return base || 'Test map';
+}
+
+async function testMapKey(buf) {
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', buf));
+  return Array.from(digest.subarray(0, 16), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+/** Build a test map from uploaded bytes WITHOUT making it active (see setTestMap). */
+async function buildTestMap(bytes, name) {
+  const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+  if (!buf.length) throw new Error('the file is empty');
+  if (buf.length > TEST_MAP_MAX_BYTES) {
+    throw new Error(`the file is ${(buf.length / 1048576).toFixed(1)} MB; test maps can be at most ${TEST_MAP_MAX_BYTES / 1048576} MB`);
+  }
+  const key = await testMapKey(buf);
+  const title = testMapName(name);
+  let built;
+  try { built = bpw.buildWorldFromEvmapBuffer(buf, title); } catch (err) {
+    throw new Error(`not a readable .evmap file (${(err && err.message) || err})`);
+  }
+  if (!built || !built.world) throw new Error('not a readable .evmap file');
+  if (!built.spawns || !built.spawns.length) throw new Error(`${title} has no spawn points — add at least one player spawn`);
+  const spawns = bpw.resolveSpawnsToFloor(built.world, built.spawns, title);
+  const map = { nid: `test:${key}`, title, evmapUrl: testMapUrl(key), thumbUrl: null, largeImageUrl: null,
+                inRotation: false, test: true, key };
+  return { map, world: built.world, spawns, teleporters: built.teleporters || [],
+           navmesh: built.navmesh || [], pickupPoints: built.pickupPoints || [],
+           vertices: built.vertices, indices: built.indices, groupIds: built.groupIds,
+           tris: built.indices.length / 3, fromCache: false, buf };
+}
+function setTestMap(loaded) {
+  _testMap = { key: loaded.map.key, name: loaded.map.title, buf: loaded.buf, size: loaded.buf.length };
+}
+function clearTestMap() { _testMap = null; }
+function testMapBytes(key) {
+  return (_testMap && typeof key === 'string' && TEST_KEY_RE.test(key) && key === _testMap.key) ? _testMap.buf : null;
+}
+function activeTestMap() {
+  return _testMap ? { key: _testMap.key, name: _testMap.name, size: _testMap.size, url: testMapUrl(_testMap.key) } : null;
+}
+
 /** Which maps are already cached (so the dashboard can show what is instant). */
 async function cachedMaps() {
   const cache = await caches.open(CACHE_NAME);
@@ -219,4 +278,5 @@ async function cachedMaps() {
   return listMaps().filter((m) => cachedUrls.has(m.evmapUrl));
 }
 
-export { listMaps, findMap, loadMap, fetchEvmap, cachedMaps, refreshExtraMaps, ensureExtraMaps, parseExtraList };
+export { listMaps, findMap, loadMap, fetchEvmap, cachedMaps, refreshExtraMaps, ensureExtraMaps, parseExtraList,
+  buildTestMap, setTestMap, clearTestMap, testMapBytes, activeTestMap, testMapUrl, TEST_MAP_MAX_BYTES };

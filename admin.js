@@ -609,9 +609,36 @@
         sel.appendChild(o);
       });
       if (keep) sel.value = keep;
-      $('mapActive').textContent = d.active ? 'active: ' + d.active : '';
+      $('mapActive').textContent = d.active ? 'active: ' + d.active + (d.testMap ? ' (test map)' : '') : '';
     });
   }
+  $('testMapLoad').onclick = function () {
+    var f = $('testMapFile').files && $('testMapFile').files[0];
+    if (!f) { toast('choose a .evmap file first', true); return; }
+    if (f.size > 32 * 1048576) { toast('test maps can be at most 32 MB', true); return; }
+    $('testMapLoad').disabled = true;
+    $('mapStatus').textContent = 'uploading ' + f.name + ' (' + (f.size / 1048576).toFixed(1) + ' MB)...';
+    var reader = new FileReader();
+    reader.onerror = function () { $('testMapLoad').disabled = false; $('mapStatus').textContent = 'could not read the file'; };
+    reader.onload = function () {
+      var url = String(reader.result);
+      fetch('/api/testmap', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: f.name, data: url.slice(url.indexOf(',') + 1) })
+      }).then(function (r) { return r.json(); }).then(function (r) {
+        $('testMapLoad').disabled = false;
+        if (!r.ok) { $('mapStatus').textContent = 'failed: ' + r.err; toast('test map failed: ' + r.err, true); return; }
+        $('mapStatus').textContent = 'test map ' + r.map + ' loaded — ' + r.tris + ' triangles, ' + r.spawns
+          + ' spawns (generation ' + r.generation + '). Not saved: loading another map removes it.';
+        toast('test map -> ' + r.map);
+        loadMaps();
+      }).catch(function (e) {
+        $('testMapLoad').disabled = false;
+        $('mapStatus').textContent = 'failed: ' + e.message;
+      });
+    };
+    reader.readAsDataURL(f);
+  };
   $('mapLoad').onclick = function () {
     var sel = $('mapSelect');
     var title = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].textContent.slice(2) : '';

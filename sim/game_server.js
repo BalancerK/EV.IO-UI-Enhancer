@@ -8544,6 +8544,7 @@ function advanceMap() {
   match.mapGeneration += 1;
   // The rotation overrides an admin pick, so its title/art must go with it.
   match.mapUrlOverride = null;
+  mapLoader.clearTestMap();
   const next = mapLoader.findMap(currentMapUrl());
   match.mapTitle = next ? next.title : "Bishop";
   match.mapThumbUrl = next ? next.thumbUrl : null;
@@ -8590,32 +8591,9 @@ async function switchMap(sessions, idOrTitle) {
   _mapSwitchInFlight = true;
   try {
     const loaded = await mapLoader.loadMap(idOrTitle);
-    bpw.setActiveWorld({
-      world: loaded.world, spawns: loaded.spawns, teleporters: loaded.teleporters,
-      navmesh: loaded.navmesh, pickupPoints: loaded.pickupPoints,
-      vertices: loaded.vertices,
-      indices: loaded.indices, groupIds: loaded.groupIds, name: loaded.map.title,
-    });
-    match.mapUrlOverride = loaded.map.evmapUrl;
-    match.mapTitle = loaded.map.title;
-    match.mapThumbUrl = loaded.map.thumbUrl || null;
-    match.teleporterUseTicks = [];
-    // Entities are positioned in the OLD geometry — a mine floating where a wall used to be is at
-    // best confusing and at worst still lethal. Drop them with the world they belonged to.
-    clearAllEntities("map switch");
-    // Same reasoning: the OLD map's pickup points/state mean nothing on the new geometry (different
-    // count, different positions) — drop and rebuild fresh rather than carry stale cooldowns over.
-    // No separate bootstrap queue to clear: buildWeaponPickupBlock resends the FULL live state to
-    // every recipient every tick (see its header comment), so the new state simply appears next tick.
-    _resetPickupState();
-    match.mapGeneration += 1;          // triggers the client-side reload + teardown
-    // Re-seat everyone on the NEW map. Deliberately NOT startNewRound: that advances the ROTATION
-    // (double-stepping the map) and, for a single-map rotation, would report "no change" and skip
-    // the re-bootstrap entirely — which is what left players frozen after a switch.
-    respawnAll(sessions);
-    for (const s of sessions.values()) if (s && s.accepted) resetSessionInputStream(s);
-    match.reintroTicks = 120;
-    resetMatchTimer();
+    applyLoadedMap(sessions, loaded);
+    // A catalogue map replaces any test map, whose bytes are then dropped for good.
+    mapLoader.clearTestMap();
     // Remember it for the next boot. Stored as the TITLE rather than whatever the caller typed, so
     // an id-based switch still reloads by a name the map list can resolve.
     S.set("startupMap", loaded.map.title, "map-switch");
@@ -8627,6 +8605,57 @@ async function switchMap(sessions, idOrTitle) {
   } finally {
     _mapSwitchInFlight = false;
   }
+}
+
+// Load an uploaded .evmap as a TEST map: same world swap and re-seat as switchMap, but the file
+// stays in memory only (map_loader.js's test-map section) — not cached, not in the map list, and
+// not remembered as the startup map, so a restart goes back to the last real map.
+async function loadTestMap(sessions, bytes, name) {
+  if (_mapSwitchInFlight) throw new Error("a map switch is already in progress");
+  _mapSwitchInFlight = true;
+  try {
+    const loaded = await mapLoader.buildTestMap(bytes, name);
+    // Serve the bytes BEFORE the generation bump: clients start downloading as soon as they see it.
+    mapLoader.setTestMap(loaded);
+    applyLoadedMap(sessions, loaded);
+    console.log(`[evio-local] TEST MAP -> ${loaded.map.title} (${(loaded.buf.length / 1048576).toFixed(1)} MB, `
+      + `${loaded.tris} tris, ${loaded.spawns.length} spawns, generation ${match.mapGeneration})`);
+    return { ok: true, map: loaded.map.title, test: true, key: loaded.map.key, size: loaded.buf.length,
+             tris: loaded.tris, spawns: loaded.spawns.length, fromCache: false, generation: match.mapGeneration };
+  } finally {
+    _mapSwitchInFlight = false;
+  }
+}
+
+// The part of a map change shared by catalogue and test maps: swap the collision world, announce
+// the new map to clients (generation bump) and put everyone on its spawns.
+function applyLoadedMap(sessions, loaded) {
+  bpw.setActiveWorld({
+    world: loaded.world, spawns: loaded.spawns, teleporters: loaded.teleporters,
+    navmesh: loaded.navmesh, pickupPoints: loaded.pickupPoints,
+    vertices: loaded.vertices,
+    indices: loaded.indices, groupIds: loaded.groupIds, name: loaded.map.title,
+  });
+  match.mapUrlOverride = loaded.map.evmapUrl;
+  match.mapTitle = loaded.map.title;
+  match.mapThumbUrl = loaded.map.thumbUrl || null;
+  match.teleporterUseTicks = [];
+  // Entities are positioned in the OLD geometry — a mine floating where a wall used to be is at
+  // best confusing and at worst still lethal. Drop them with the world they belonged to.
+  clearAllEntities("map switch");
+  // Same reasoning: the OLD map's pickup points/state mean nothing on the new geometry (different
+  // count, different positions) — drop and rebuild fresh rather than carry stale cooldowns over.
+  // No separate bootstrap queue to clear: buildWeaponPickupBlock resends the FULL live state to
+  // every recipient every tick (see its header comment), so the new state simply appears next tick.
+  _resetPickupState();
+  match.mapGeneration += 1;          // triggers the client-side reload + teardown
+  // Re-seat everyone on the NEW map. Deliberately NOT startNewRound: that advances the ROTATION
+  // (double-stepping the map) and, for a single-map rotation, would report "no change" and skip
+  // the re-bootstrap entirely — which is what left players frozen after a switch.
+  respawnAll(sessions);
+  for (const s of sessions.values()) if (s && s.accepted) resetSessionInputStream(s);
+  match.reintroTicks = 120;
+  resetMatchTimer();
 }
 
 // Reset every player for a fresh start: stats cleared, alive, full ammo, seated on the ACTIVE map's
@@ -12364,6 +12393,7 @@ const serverExports = {
   computeSyncValue,
   // map loading / switching
   switchMap,
+  loadTestMap,
   applySpawnCounters,
   handleLobbyIntent,
   lobbyEventInFrames,

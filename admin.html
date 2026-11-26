@@ -342,6 +342,16 @@
                 border-radius:6px; border:1px solid var(--line); background:var(--bg); color:var(--fg);"></select>
         <button id="mapLoad">Load map</button>
       </div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-top:12px;">
+        <input type="file" id="testMapFile" accept=".evmap" style="flex:1; min-width:220px; font:13px/1.4 inherit;">
+        <button id="testMapLoad">Load test map</button>
+      </div>
+      <p class="muted" style="margin:6px 0 0; font-size:12px;">
+        <b>Test map:</b> upload any .evmap (for example one exported from EV.IO Map Editor) to play it
+        with everyone in your lobby. Players' extensions download it from you over the lobby
+        connection. It is kept in memory only: not saved, not cached and not added to the map list,
+        and it is gone once you load another map.
+      </p>
       <p class="muted" style="margin:10px 0 0; font-size:12px;">
         Maps are downloaded from ev.io on first use and cached on disk, so nothing large ships with
         the server. <b>&#9679;</b> marks maps already cached (instant). Switching reloads the map for

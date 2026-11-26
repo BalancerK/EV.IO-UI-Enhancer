@@ -21857,14 +21857,21 @@ var EvioSim = (() => {
   // sim/map_loader.js
   var map_loader_exports = {};
   __export(map_loader_exports, {
+    TEST_MAP_MAX_BYTES: () => TEST_MAP_MAX_BYTES,
+    activeTestMap: () => activeTestMap,
+    buildTestMap: () => buildTestMap,
     cachedMaps: () => cachedMaps,
+    clearTestMap: () => clearTestMap,
     ensureExtraMaps: () => ensureExtraMaps,
     fetchEvmap: () => fetchEvmap,
     findMap: () => findMap,
     listMaps: () => listMaps,
     loadMap: () => loadMap,
     parseExtraList: () => parseExtraList,
-    refreshExtraMaps: () => refreshExtraMaps
+    refreshExtraMaps: () => refreshExtraMaps,
+    setTestMap: () => setTestMap,
+    testMapBytes: () => testMapBytes,
+    testMapUrl: () => testMapUrl
   });
 
   // sim/maps.json
@@ -22031,6 +22038,75 @@ var EvioSim = (() => {
       _worldCache.delete(_worldCache.keys().next().value);
     }
     return { ...entry, fromCache, buildMs };
+  }
+  var TEST_MAP_MAX_BYTES = 32 * 1024 * 1024;
+  var TEST_MAP_ORIGIN = "https://evio-test-map.invalid";
+  var TEST_KEY_RE = /^[0-9a-f]{32}$/;
+  var _testMap = null;
+  function testMapUrl(key) {
+    return `${TEST_MAP_ORIGIN}/maps/test/${key}.evmap`;
+  }
+  function testMapName(name) {
+    const base = String(name || "").split(/[\\/]/).pop().replace(/\.evmap$/i, "").replace(/[^\p{L}\p{N} ._'()-]+/gu, " ").replace(/[\s_]+/g, " ").trim().slice(0, 48);
+    return base || "Test map";
+  }
+  async function testMapKey(buf) {
+    const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", buf));
+    return Array.from(digest.subarray(0, 16), (b2) => b2.toString(16).padStart(2, "0")).join("");
+  }
+  async function buildTestMap(bytes, name) {
+    const buf = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []);
+    if (!buf.length) throw new Error("the file is empty");
+    if (buf.length > TEST_MAP_MAX_BYTES) {
+      throw new Error(`the file is ${(buf.length / 1048576).toFixed(1)} MB; test maps can be at most ${TEST_MAP_MAX_BYTES / 1048576} MB`);
+    }
+    const key = await testMapKey(buf);
+    const title = testMapName(name);
+    let built;
+    try {
+      built = physics_world_default.buildWorldFromEvmapBuffer(buf, title);
+    } catch (err) {
+      throw new Error(`not a readable .evmap file (${err && err.message || err})`);
+    }
+    if (!built || !built.world) throw new Error("not a readable .evmap file");
+    if (!built.spawns || !built.spawns.length) throw new Error(`${title} has no spawn points \u2014 add at least one player spawn`);
+    const spawns = physics_world_default.resolveSpawnsToFloor(built.world, built.spawns, title);
+    const map = {
+      nid: `test:${key}`,
+      title,
+      evmapUrl: testMapUrl(key),
+      thumbUrl: null,
+      largeImageUrl: null,
+      inRotation: false,
+      test: true,
+      key
+    };
+    return {
+      map,
+      world: built.world,
+      spawns,
+      teleporters: built.teleporters || [],
+      navmesh: built.navmesh || [],
+      pickupPoints: built.pickupPoints || [],
+      vertices: built.vertices,
+      indices: built.indices,
+      groupIds: built.groupIds,
+      tris: built.indices.length / 3,
+      fromCache: false,
+      buf
+    };
+  }
+  function setTestMap(loaded) {
+    _testMap = { key: loaded.map.key, name: loaded.map.title, buf: loaded.buf, size: loaded.buf.length };
+  }
+  function clearTestMap() {
+    _testMap = null;
+  }
+  function testMapBytes(key) {
+    return _testMap && typeof key === "string" && TEST_KEY_RE.test(key) && key === _testMap.key ? _testMap.buf : null;
+  }
+  function activeTestMap() {
+    return _testMap ? { key: _testMap.key, name: _testMap.name, size: _testMap.size, url: testMapUrl(_testMap.key) } : null;
   }
   async function cachedMaps() {
     const cache = await caches.open(CACHE_NAME);
@@ -28570,6 +28646,7 @@ var EvioSim = (() => {
     match.mapIndex = (match.mapIndex + 1) % rot.length;
     match.mapGeneration += 1;
     match.mapUrlOverride = null;
+    clearTestMap();
     const next = findMap(currentMapUrl());
     match.mapTitle = next ? next.title : "Bishop";
     match.mapThumbUrl = next ? next.thumbUrl : null;
@@ -28595,28 +28672,8 @@ var EvioSim = (() => {
     _mapSwitchInFlight = true;
     try {
       const loaded = await loadMap(idOrTitle);
-      physics_world_default.setActiveWorld({
-        world: loaded.world,
-        spawns: loaded.spawns,
-        teleporters: loaded.teleporters,
-        navmesh: loaded.navmesh,
-        pickupPoints: loaded.pickupPoints,
-        vertices: loaded.vertices,
-        indices: loaded.indices,
-        groupIds: loaded.groupIds,
-        name: loaded.map.title
-      });
-      match.mapUrlOverride = loaded.map.evmapUrl;
-      match.mapTitle = loaded.map.title;
-      match.mapThumbUrl = loaded.map.thumbUrl || null;
-      match.teleporterUseTicks = [];
-      clearAllEntities("map switch");
-      _resetPickupState();
-      match.mapGeneration += 1;
-      respawnAll(sessions);
-      for (const s2 of sessions.values()) if (s2 && s2.accepted) resetSessionInputStream(s2);
-      match.reintroTicks = 120;
-      resetMatchTimer();
+      applyLoadedMap(sessions, loaded);
+      clearTestMap();
       set("startupMap", loaded.map.title, "map-switch");
       console.log(`[evio-local] MAP -> ${loaded.map.title} (${loaded.tris} tris, ${loaded.spawns.length} spawns, generation ${match.mapGeneration}, ${loaded.fromCache ? "cached" : "downloaded"})`);
       return {
@@ -28630,6 +28687,53 @@ var EvioSim = (() => {
     } finally {
       _mapSwitchInFlight = false;
     }
+  }
+  async function loadTestMap(sessions, bytes, name) {
+    if (_mapSwitchInFlight) throw new Error("a map switch is already in progress");
+    _mapSwitchInFlight = true;
+    try {
+      const loaded = await buildTestMap(bytes, name);
+      setTestMap(loaded);
+      applyLoadedMap(sessions, loaded);
+      console.log(`[evio-local] TEST MAP -> ${loaded.map.title} (${(loaded.buf.length / 1048576).toFixed(1)} MB, ${loaded.tris} tris, ${loaded.spawns.length} spawns, generation ${match.mapGeneration})`);
+      return {
+        ok: true,
+        map: loaded.map.title,
+        test: true,
+        key: loaded.map.key,
+        size: loaded.buf.length,
+        tris: loaded.tris,
+        spawns: loaded.spawns.length,
+        fromCache: false,
+        generation: match.mapGeneration
+      };
+    } finally {
+      _mapSwitchInFlight = false;
+    }
+  }
+  function applyLoadedMap(sessions, loaded) {
+    physics_world_default.setActiveWorld({
+      world: loaded.world,
+      spawns: loaded.spawns,
+      teleporters: loaded.teleporters,
+      navmesh: loaded.navmesh,
+      pickupPoints: loaded.pickupPoints,
+      vertices: loaded.vertices,
+      indices: loaded.indices,
+      groupIds: loaded.groupIds,
+      name: loaded.map.title
+    });
+    match.mapUrlOverride = loaded.map.evmapUrl;
+    match.mapTitle = loaded.map.title;
+    match.mapThumbUrl = loaded.map.thumbUrl || null;
+    match.teleporterUseTicks = [];
+    clearAllEntities("map switch");
+    _resetPickupState();
+    match.mapGeneration += 1;
+    respawnAll(sessions);
+    for (const s2 of sessions.values()) if (s2 && s2.accepted) resetSessionInputStream(s2);
+    match.reintroTicks = 120;
+    resetMatchTimer();
   }
   function respawnAll(sessions) {
     const spawns = activeSpawnPoints();
@@ -31506,6 +31610,7 @@ var EvioSim = (() => {
     computeSyncValue,
     // map loading / switching
     switchMap,
+    loadTestMap,
     applySpawnCounters,
     handleLobbyIntent,
     lobbyEventInFrames,

@@ -354,6 +354,71 @@
             .catch((e) => console.warn('[evio-ext] all-skins fetch failed', e));
     } catch (e) { /* ignore */ }
 
+    // ── Test maps ─────────────────────────────────────────────────────────────────────────────
+    // A lobby's host can load an uploaded .evmap as a test map that exists only in the host's
+    // memory. The server announces it as .../maps/test/<key>.evmap, and the game downloads maps with
+    // a plain XMLHttpRequest (three.js FileLoader). In a custom lobby, that request is held here
+    // until background.js has the bytes (from our own sim when we host, otherwise from the lobby's
+    // host over the WebRTC connection — see background.js's TM_REQ note), then pointed at an
+    // in-page blob: URL, so the game's own load/progress/error handlers run exactly as usual.
+    const TEST_MAP_URL_RE = /\/maps\/test\/([0-9a-f]{32})\.evmap(?:[?#]|$)/;
+    const testMapWaiters = new Map(); // request id -> callback
+    const testMapBlobUrls = new Map(); // key -> blob: URL (one per test map, reused on reloads)
+    let testMapSeq = 0;
+    window.addEventListener('message', (event) => {
+        if (event.source !== window || event.origin !== window.location.origin) return;
+        const msg = event.data;
+        if (!msg || msg.source !== RELAY_MSG_SOURCE || msg.type !== 'test-map-response') return;
+        const cb = testMapWaiters.get(msg.id);
+        if (cb) { testMapWaiters.delete(msg.id); cb(msg); }
+    });
+    function testMapBlobUrl(key) {
+        if (testMapBlobUrls.has(key)) return Promise.resolve(testMapBlobUrls.get(key));
+        return new Promise((resolve, reject) => {
+            const id = ++testMapSeq;
+            testMapWaiters.set(id, (msg) => {
+                if (!msg.ok) { reject(new Error(msg.error || 'test map unavailable')); return; }
+                for (const old of testMapBlobUrls.values()) URL.revokeObjectURL(old);
+                testMapBlobUrls.clear();
+                const url = URL.createObjectURL(new Blob([msg.data], { type: 'application/octet-stream' }));
+                testMapBlobUrls.set(key, url);
+                resolve(url);
+            });
+            window.postMessage({ source: HOOK_MSG_SOURCE, type: 'test-map-request', id, key }, window.location.origin);
+        });
+    }
+    if (hostingActive) {
+        const xhrOpen = XMLHttpRequest.prototype.open;
+        const xhrSend = XMLHttpRequest.prototype.send;
+        const xhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
+        XMLHttpRequest.prototype.open = function (method, url) {
+            const m = typeof url === 'string' ? TEST_MAP_URL_RE.exec(url) : null;
+            if (!m) { this.__evioTestMap = null; return xhrOpen.apply(this, arguments); }
+            // Not opened yet: send() opens it once the bytes are here. Headers set meanwhile are kept.
+            this.__evioTestMap = { key: m[1], method, url, headers: [] };
+        };
+        XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
+            if (this.__evioTestMap) { this.__evioTestMap.headers.push([name, value]); return; }
+            return xhrSetHeader.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function () {
+            const tm = this.__evioTestMap;
+            if (!tm) return xhrSend.apply(this, arguments);
+            this.__evioTestMap = null;
+            console.log('[evio-ext] downloading test map ' + tm.key + ' from the lobby host');
+            const go = (url) => {
+                xhrOpen.call(this, tm.method, url, true);
+                for (const [n, v] of tm.headers) { try { xhrSetHeader.call(this, n, v); } catch (e) { /* not for blob: */ } }
+                xhrSend.call(this);
+            };
+            testMapBlobUrl(tm.key).then(go, (err) => {
+                // Let the real request fail the normal way, so the game shows its usual load error.
+                console.error('[evio-ext] test map download failed:', err && err.message);
+                go(tm.url);
+            });
+        };
+    }
+
     function LocalSimSocket() {
         this.readyState = 0; // CONNECTING
         this.binaryType = 'blob';

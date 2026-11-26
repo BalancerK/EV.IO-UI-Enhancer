@@ -241,6 +241,115 @@ const HOST_PORT_NAME = 'evio-hosting';
 const NETLIB_PING = '\u0000EVIO_PING';
 const NETLIB_PONG = '\u0000EVIO_PONG';
 
+// ── Test maps over the lobby connection ─────────────────────────────────────────────────────
+// A test map (an .evmap the host uploaded from quick admin or the dashboard) exists only in the
+// host's memory, so players' game clients cannot download it from a URL. Instead page-socket-hook.js
+// intercepts the game's request for /maps/test/<key>.evmap and asks us (testMapGet below); we answer
+// from our own sim when we are the host, and otherwise fetch it from the lobby's host over the
+// reliable data channel, using the same messages as the Node server's netlib_adapter.js:
+//   joiner -> host   \0EVIO_TM_REQ|<key>|<first chunk>|<count>
+//   host -> joiner   \0EVIO_TM|<key>|<index>|<total chunks>|<file size>|<base64>   (one per chunk)
+//                    \0EVIO_TM_ERR|<key>|<reason>
+// The joiner asks for one window at a time, so the host never queues the whole file at once.
+const TM_REQ = '\u0000EVIO_TM_REQ|';
+const TM_CHUNK = '\u0000EVIO_TM|';
+const TM_ERR = '\u0000EVIO_TM_ERR|';
+const TM_CHUNK_BYTES = 48 * 1024;
+const TM_WINDOW = 16;
+const TM_IDLE_TIMEOUT_MS = 20000;
+
+function bytesToBase64(bytes) {
+    let s = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+    return btoa(s);
+}
+function base64ToBytes(b64) {
+    const s = atob(b64);
+    const out = new Uint8Array(s.length);
+    for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
+    return out;
+}
+
+// Host side: answer one request from a peer in our lobby.
+function answerTestMapRequest(peerId, data) {
+    const [key, fromRaw, countRaw] = data.slice(TM_REQ.length).split('|');
+    const send = (m) => sendToOffscreen({ type: 'host:send', peerId, channel: 'reliable', data: m });
+    const buf = /^[0-9a-f]{32}$/.test(key || '') ? sim.gameServer.mapLoader.testMapBytes(key) : null;
+    if (!buf) { send(TM_ERR + String(key || '').replace(/[^0-9a-f]/g, '').slice(0, 32) + '|the host is not running that test map'); return; }
+    const total = Math.ceil(buf.length / TM_CHUNK_BYTES);
+    const from = Math.max(0, Math.floor(Number(fromRaw) || 0));
+    const count = Math.min(32, Math.max(1, Math.floor(Number(countRaw) || 1)));
+    for (let i = from; i < Math.min(total, from + count); i++) {
+        send([TM_CHUNK + key, i, total, buf.length, bytesToBase64(buf.subarray(i * TM_CHUNK_BYTES, (i + 1) * TM_CHUNK_BYTES))].join('|'));
+    }
+}
+
+// Joiner side. One download per key at a time; the finished file is kept in memory only, for the
+// map reload a later re-bootstrap may trigger, and replaced by the next test map.
+const testMapDownloads = new Map(); // key -> { requestId, parts, total, size, received, resolve, reject, timer }
+let lastTestMap = null;             // { key, bytes }
+
+function fetchTestMapFromHost(key) {
+    if (lastTestMap && lastTestMap.key === key) return Promise.resolve(lastTestMap.bytes);
+    const running = testMapDownloads.get(key);
+    if (running) return running.promise;
+    const requestId = Array.from(joinSockets.keys()).pop();
+    if (requestId == null) return Promise.reject(new Error('not connected to a lobby'));
+    const dl = { requestId, parts: [], total: 0, size: 0, received: 0, timer: null };
+    dl.promise = new Promise((resolve, reject) => { dl.resolve = resolve; dl.reject = reject; });
+    const fail = (err) => { clearTimeout(dl.timer); testMapDownloads.delete(key); dl.reject(err); };
+    dl.fail = fail;
+    dl.touch = () => { clearTimeout(dl.timer); dl.timer = setTimeout(() => fail(new Error('the host stopped sending the test map')), TM_IDLE_TIMEOUT_MS); };
+    dl.ask = (from) => {
+        try { sendToOffscreen({ type: 'join:send', requestId, channel: 'reliable', data: `${TM_REQ}${key}|${from}|${TM_WINDOW}` }); } catch (err) { fail(err); }
+    };
+    testMapDownloads.set(key, dl);
+    dl.touch();
+    dl.ask(0);
+    return dl.promise;
+}
+
+// A chunk or error from the host we joined. Returns true when the message was test-map traffic.
+function handleTestMapReply(data) {
+    if (typeof data !== 'string') return false;
+    if (data.startsWith(TM_ERR)) {
+        const [key, reason] = data.slice(TM_ERR.length).split('|');
+        const dl = testMapDownloads.get(key);
+        if (dl) dl.fail(new Error(reason || 'the host refused the test map request'));
+        return true;
+    }
+    if (!data.startsWith(TM_CHUNK)) return false;
+    const [key, iRaw, totalRaw, sizeRaw, b64] = data.slice(TM_CHUNK.length).split('|');
+    const dl = testMapDownloads.get(key);
+    if (!dl) return true;
+    const i = Number(iRaw), total = Number(totalRaw), size = Number(sizeRaw);
+    if (!Number.isInteger(i) || !Number.isInteger(total) || total <= 0 || total > 1024 || i < 0 || i >= total) { dl.fail(new Error('bad test map chunk')); return true; }
+    dl.total = total; dl.size = size;
+    if (!dl.parts[i]) { dl.parts[i] = base64ToBytes(b64 || ''); dl.received++; }
+    dl.touch();
+    if (dl.received === total) {
+        clearTimeout(dl.timer);
+        testMapDownloads.delete(key);
+        const bytes = new Uint8Array(size);
+        let off = 0;
+        for (const p of dl.parts) { bytes.set(p, off); off += p.length; }
+        if (off !== size) { dl.reject(new Error('the test map arrived incomplete')); return true; }
+        lastTestMap = { key, bytes };
+        dl.resolve(bytes);
+    } else if ((i + 1) % TM_WINDOW === 0 && i + 1 < total) {
+        dl.ask(i + 1);   // the window is done (the reliable channel is ordered): ask for the next
+    }
+    return true;
+}
+
+// The page asked for a test map's bytes: ours if we host it, else the lobby host's.
+async function getTestMapBytes(key) {
+    if (!/^[0-9a-f]{32}$/.test(String(key))) throw new Error('bad test map key');
+    const own = sim.gameServer.mapLoader.testMapBytes(key);
+    if (own) return own;
+    return fetchTestMapFromHost(key);
+}
+
 // ── Offscreen document relay ────────────────────────────────────────────────────────────────
 // RTCPeerConnection does not exist in a service worker (confirmed live: "ReferenceError:
 // RTCPeerConnection is not defined", thrown from inside netlib-client.js the moment an actual
@@ -398,6 +507,10 @@ function handleOffscreenMessage(msg) {
         if (!sock) return; // from a peer we never finished wrapping, or already closed
         if (msg.data === NETLIB_PING) { try { sendToOffscreen({ type: 'host:send', peerId: msg.peerId, channel: 'reliable', data: NETLIB_PONG }); } catch (e) { /* ignore */ } return; }
         if (msg.data === NETLIB_PONG) { sock.isAlive = true; sock.emit('pong'); return; }
+        if (typeof msg.data === 'string' && msg.data.startsWith(TM_REQ)) {
+            try { answerTestMapRequest(msg.peerId, msg.data); } catch (e) { console.error('[evio-ext] test map request failed', e); }
+            return;
+        }
         sock.emit('message', fromWire(msg.data), msg.isBinary);
         return;
     }
@@ -408,6 +521,7 @@ function handleOffscreenMessage(msg) {
         if (!entry) return;
         if (msg.data === NETLIB_PING) { try { sendToOffscreen({ type: 'join:send', requestId: msg.requestId, channel: 'reliable', data: NETLIB_PONG }); } catch (e) { /* ignore */ } return; }
         if (msg.data === NETLIB_PONG) return; // no heartbeat sweep on this side needs it
+        if (handleTestMapReply(msg.data)) return; // test-map transfer, never game traffic
         // .send() (deliver OUT to the Port, i.e. to the page), NOT .emit('message', ...) — that
         // would re-trigger the client-outgoing listener registered in joinRemoteLobby (sock.on
         // ('message', ...) means "the page sent this TO the server"), looping the server's own
@@ -644,6 +758,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return true;
     }
 
+    if (msg.type === 'testMapGet') {
+        // page-socket-hook.js wants a test map's bytes for the game's map download (see TM_REQ).
+        getTestMapBytes(msg.key).then(
+            (bytes) => sendResponse({ ok: true, data: bytesToBase64(bytes) }),
+            (err) => sendResponse({ ok: false, error: String((err && err.message) || err) }));
+        return true;
+    }
+
     if (msg.type === 'admin') {
         handleAdminRequest(msg.path, msg.method, msg.body).then(sendResponse);
         return true;
@@ -699,11 +821,25 @@ async function handleAdminRequest(path, method, body) {
                 ok: true, status: 200,
                 body: {
                     active: sim.gameServer.getStatus().map,
+                    testMap: sim.gameServer.mapLoader.activeTestMap(),
                     maps: sim.gameServer.mapLoader.listMaps().map((m) => ({
                         nid: m.nid, title: m.title, cached: cached.has(m.nid), inRotation: m.inRotation,
                     })),
                 },
             };
+        }
+        if (method === 'POST' && path === '/api/testmap') {
+            // An uploaded .evmap ({name, data: base64}) loaded as a TEST map: memory only — not in
+            // Cache Storage, not in the map list, gone once another map is loaded. Players get it from
+            // this host over the lobby connection (see TM_REQ above).
+            try {
+                if (!body || typeof body.data !== 'string' || !body.data) throw new Error('no file data');
+                await ensureGameServerStarted();
+                const r = await sim.gameServer.loadTestMap(sim.gameServer.getSessions(), base64ToBytes(body.data), body.name);
+                return { ok: true, status: 200, body: r };
+            } catch (err) {
+                return { ok: false, status: 400, body: { ok: false, err: String((err && err.message) || err) } };
+            }
         }
         if (method === 'POST' && path === '/api/map') {
             // Downloads + converts on first use (a few seconds — real network fetch of a few MB,

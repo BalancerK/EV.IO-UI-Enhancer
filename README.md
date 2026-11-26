@@ -25,6 +25,12 @@ ev.io or its operator. It's meant for private play with people you know — see
   multiplier, bot count/level/behavior toggles, announcements, and match controls (restart
   round, heal all, add time, etc.) — the same levers the full admin dashboard exposes, for
   the things you'd actually want to change mid-match.
+- **Test maps**: *Load test map…* in quick admin (or the dashboard's Map tab) plays any
+  `.evmap` from your computer, for example one exported from
+  [EV.IO Map Editor](https://balancerk.github.io/EV.IO-MAP-EDITOR/), with everyone in your
+  lobby. Players' extensions download it from you over the lobby connection, so nothing is
+  uploaded anywhere. It stays in memory only: not cached, not added to the map list, and gone
+  once you load another map.
 - **The same bots** as the Node server: a skill-curve difficulty model, pathfinding,
   grenades/abilities, and simulated reaction time — not an instant, unfair read of the true
   game state.

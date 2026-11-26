@@ -1148,12 +1148,21 @@ window.addEventListener('load', () => {
         let data;
         try { data = await adminFetch('/api/maps'); } catch (e) { return; }
         select.innerHTML = '';
+        // While a test map runs, the dropdown shows it as a placeholder entry (it is in no list, so
+        // picking any real map — even the one it was on before — is a genuine change).
+        if (data.testMap) {
+            const o = document.createElement('option');
+            o.value = ''; o.textContent = `${data.testMap.name} (test map)`; o.disabled = true; o.selected = true;
+            select.appendChild(o);
+        }
         (data.maps || []).forEach((m) => {
             const o = document.createElement('option');
             o.value = m.title; o.textContent = m.title;
-            if (m.title === data.active) o.selected = true;
+            if (!data.testMap && m.title === data.active) o.selected = true;
             select.appendChild(o);
         });
+        const note = document.getElementById('ev-quick-admin-testmap');
+        if (note) note.textContent = data.testMap ? `Playing test map: ${data.testMap.name}` : '';
     }
 
     function buildQuickAdminPanel() {
@@ -1185,12 +1194,59 @@ window.addEventListener('load', () => {
             try {
                 await adminFetch('/api/map', 'POST', { map: mapSelect.value });
                 quickAdminStatus(`Map switched to ${mapSelect.value}.`, false);
+                loadQuickAdminMaps();
             } catch (e) {
                 quickAdminStatus(`Map switch failed: ${(e && e.message) || e}`, true);
             }
         });
         mapSection.appendChild(mapHeading);
         mapSection.appendChild(mapSelect);
+
+        // Test map: any .evmap from this computer, played by everyone in the lobby. It stays in
+        // memory only (not cached, not in the map list) — see background.js's /api/testmap.
+        const testRow = document.createElement('div');
+        testRow.className = 'ev-field-row';
+        const testFile = document.createElement('input');
+        testFile.type = 'file';
+        testFile.accept = '.evmap';
+        testFile.id = 'ev-quick-admin-testmap-file';
+        testFile.style.display = 'none';
+        const testBtn = document.createElement('button');
+        testBtn.type = 'button';
+        testBtn.className = 'ev-btn-reset';
+        testBtn.textContent = 'Load test map…';
+        testBtn.title = 'Play a .evmap from this computer with everyone in your lobby. It is not saved or added to the map list.';
+        testBtn.addEventListener('click', () => testFile.click());
+        testFile.addEventListener('change', () => {
+            const f = testFile.files && testFile.files[0];
+            testFile.value = '';
+            if (!f) return;
+            if (f.size > 32 * 1048576) { quickAdminStatus('Test maps can be at most 32 MB.', true); return; }
+            quickAdminStatus(`Loading test map ${f.name}…`, false);
+            testBtn.disabled = true;
+            const reader = new FileReader();
+            reader.onerror = () => { testBtn.disabled = false; quickAdminStatus('Could not read that file.', true); };
+            reader.onload = async () => {
+                const url = String(reader.result);
+                try {
+                    const r = await adminFetch('/api/testmap', 'POST', { name: f.name, data: url.slice(url.indexOf(',') + 1) });
+                    quickAdminStatus(`Test map ${r.map} loaded (${r.spawns} spawns). Loading another map removes it.`, false);
+                    loadQuickAdminMaps();
+                } catch (e) {
+                    quickAdminStatus(`Test map failed: ${(e && e.message) || e}`, true);
+                } finally {
+                    testBtn.disabled = false;
+                }
+            };
+            reader.readAsDataURL(f);
+        });
+        const testNote = document.createElement('span');
+        testNote.id = 'ev-quick-admin-testmap';
+        testNote.className = 'ev-field-hint';
+        testRow.appendChild(testBtn);
+        testRow.appendChild(testNote);
+        testRow.appendChild(testFile);
+        mapSection.appendChild(testRow);
         panel.appendChild(mapSection);
 
         // ----- Settings -----
@@ -1373,6 +1429,18 @@ window.addEventListener('load', () => {
         } else if (msg.type === 'socket-close') {
             console.warn('[evio-ext] socket-close requested by the page hook');
             if (localGameSocketPort) { try { localGameSocketPort.disconnect(); } catch (e) { /* ignore */ } localGameSocketPort = null; }
+        } else if (msg.type === 'test-map-request') {
+            // The game is downloading a test map (see page-socket-hook.js): background.js has it in
+            // memory if we host the lobby, or fetches it from the lobby's host. The bytes go back to
+            // the page as an ArrayBuffer (window.postMessage clones it natively).
+            const reply = (extra) => window.postMessage({ source: RELAY_MSG_SOURCE, type: 'test-map-response', id: msg.id, ...extra }, window.location.origin);
+            chrome.runtime.sendMessage({ type: 'testMapGet', key: msg.key }).then((resp) => {
+                if (!resp || !resp.ok) { reply({ ok: false, error: (resp && resp.error) || 'no response' }); return; }
+                const s = atob(resp.data);
+                const bytes = new Uint8Array(s.length);
+                for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
+                reply({ ok: true, data: bytes.buffer });
+            }).catch((e) => reply({ ok: false, error: String((e && e.message) || e) }));
         }
     });
 
