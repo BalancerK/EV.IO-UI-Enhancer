@@ -335,6 +335,39 @@
     }
 
     const _nativeFetch = window.fetch.bind(window);
+
+    // ── Start the two account requests at once ────────────────────────────────────────────────
+    // The game asks ev.io for /session/token and then, only once that has answered, for
+    // /me?_format=json, about 2 s into the page load. They do not depend on each other (/me sends no
+    // token; the token is only used later, to join the game server), and ev.io's account server
+    // often takes several seconds for each. So both are requested here, the moment the page starts,
+    // side by side, and the game's own request is answered from them. Each is used ONCE, within the
+    // first minute; any later request goes to ev.io as usual, and a failure falls back to a real one.
+    const EARLY_STARTUP_TTL_MS = 60000;
+    const earlyStartup = new Map();   // absolute URL -> Promise<Response>
+    if (window.top === window && window.location.origin === 'https://ev.io'
+        && !new URLSearchParams(window.location.search).has('auth')) {
+        const startedAt = Date.now();
+        const begin = (url, init) => {
+            const pr = _nativeFetch(url, init);
+            pr.catch(() => {});
+            earlyStartup.set(url, { pr, startedAt });
+        };
+        try {
+            begin('https://ev.io/session/token', { method: 'GET' });
+            begin('https://ev.io/me?_format=json', { method: 'GET', headers: { Accept: 'application/json' } });
+        } catch (e) { /* ignore */ }
+    }
+    function takeEarlyStartup(url) {
+        if (!earlyStartup.size) return null;
+        let abs;
+        try { abs = new URL(String(url), window.location.href).href; } catch (e) { return null; }
+        const entry = earlyStartup.get(abs);
+        if (!entry) return null;
+        earlyStartup.delete(abs);
+        if (Date.now() - entry.startedAt > EARLY_STARTUP_TTL_MS) return null;
+        return entry.pr;
+    }
     window.fetch = function (input, init) {
         let url = '';
         try { url = typeof input === 'string' ? input : (input && input.url) || ''; } catch (e) { /* ignore */ }
@@ -342,7 +375,10 @@
         try { method = String((init && init.method) || (input && typeof input === 'object' && input.method) || 'GET').toUpperCase(); } catch (e) { /* ignore */ }
         const assetKey = method === 'GET' ? assetCacheKey(url) : null;
         const args = arguments, self = this;
-        const p = assetKey
+        const early = method === 'GET' ? takeEarlyStartup(url) : null;
+        const p = early
+            ? early.catch(() => _nativeFetch.apply(self, args))
+            : assetKey
             ? cachedFetch(assetKey, url).catch(() => _nativeFetch.apply(self, args))
             : _nativeFetch.apply(this, arguments);
         try {
@@ -486,6 +522,8 @@
         }
         return { items, bytes, count: items.length };
     }
+    const BILLBOARD_WAIT_MS = 3000;
+    const BLANK_IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
     // Pictures (billboards, textures, icons) are loaded by setting img.src (three.js ImageLoader),
     // so serve those from a blob: URL. Until it is ready, reading .src gives back what was set.
     (function hookImageSrc() {
@@ -502,8 +540,22 @@
                 if (!key) { this.__evioImgPending = null; desc.set.call(this, value); return; }
                 const tok = this.__evioImgTok;
                 this.__evioImgPending = s;
+                // Billboards are decoration, but the game will not finish "Loading map..." until
+                // every one has loaded, and a single one has taken minutes from ev.io. One that is
+                // not cached yet and not here within BILLBOARD_WAIT_MS is shown blank for this match;
+                // its download carries on into the cache, so the next join has the real picture.
+                let settled = false;
+                const fallback = /\/sites\/default\/files\/billboards\//.test(key) ? setTimeout(() => {
+                    if (settled || this.__evioImgTok !== tok) return;
+                    settled = true;
+                    this.__evioImgPending = null;
+                    console.log('[evio-ext] billboard still downloading, shown blank for now: ' + s);
+                    desc.set.call(this, BLANK_IMAGE);
+                }, BILLBOARD_WAIT_MS) : null;
                 assetBlobUrl(key, s).then((blobUrl) => {
-                    if (this.__evioImgTok !== tok) { URL.revokeObjectURL(blobUrl); return; }
+                    if (fallback) clearTimeout(fallback);
+                    if (settled || this.__evioImgTok !== tok) { URL.revokeObjectURL(blobUrl); return; }
+                    settled = true;
                     this.__evioImgPending = null;
                     const release = () => {
                         this.removeEventListener('load', release);
@@ -514,7 +566,9 @@
                     this.addEventListener('error', release);
                     desc.set.call(this, blobUrl);
                 }, () => {
-                    if (this.__evioImgTok !== tok) return;
+                    if (fallback) clearTimeout(fallback);
+                    if (settled || this.__evioImgTok !== tok) return;
+                    settled = true;
                     this.__evioImgPending = null;
                     desc.set.call(this, s);   // let the browser load it the normal way
                 });
@@ -914,7 +968,21 @@
             from: "var o=Id.gameModes[t];o.disabled||o.dontAllowPublicGames||(Vx.Mobile.DETECTED&&o.allowMobile||!Vx.Mobile.DETECTED)&&(e+='<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option\"><a href=\"#\">'+(0,kd.translateText)(o.name)+'</a></li>')}e+='</ul></span></div>'",
             to:   "var o=Id.gameModes[t];(o.disabled||o.dontAllowPublicGames)?(/^(deathmatch|deathmatch_fractal_earn|team_deathmatch_earn|survival|last_team_standing)$/.test(t)||(window.__EVIO_EXT_MORE_MODES__=(window.__EVIO_EXT_MORE_MODES__||'')+'<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option evio-more-mode\"><a href=\"#\">'+(0,kd.translateText)(o.name)+'</a></li>')):(Vx.Mobile.DETECTED&&o.allowMobile||!Vx.Mobile.DETECTED)&&(e+='<li data-mode-id=\"'+t+'\" class=\"game-modes-select-option\"><a href=\"#\">'+(0,kd.translateText)(o.name)+'</a></li>')}window.__EVIO_EXT_MORE_MODES__&&(e+='<li role=\"separator\" class=\"divider\"></li><li class=\"dropdown-header evio-more-header\">Additional gamemodes</li>'+window.__EVIO_EXT_MORE_MODES__),window.__EVIO_EXT_MORE_MODES__='',e+='</ul></span></div>'",
         },
+        {
+            // The loading screen stays up until the match has run 150 ticks (50 in lobby rooms):
+            // 7.5 s at 20 Hz on EVERY join, counted only after the map is built and the match is
+            // already running behind it. Close it after __EVIO_EXT_LOADSCREEN_TICKS__ (default 20,
+            // one second; localStorage evioLoadScreenTicks overrides, 150 restores the original).
+            name: 'LS1 close the loading screen after 1 s of play instead of 7.5 s',
+            from: '!i&&(k>150||e.curServerView.fullGameState.roomParams.lobby&&k>50)&&(cb.LoadingUI.removeLoadScreen(),i=!0)',
+            to:   '!i&&(k>(window.__EVIO_EXT_LOADSCREEN_TICKS__||150)||e.curServerView.fullGameState.roomParams.lobby&&k>Math.min(50,window.__EVIO_EXT_LOADSCREEN_TICKS__||50))&&(cb.LoadingUI.removeLoadScreen(),i=!0)',
+        },
     ];
+    window.__EVIO_EXT_LOADSCREEN_TICKS__ = 20;
+    try {
+        const t = parseInt(window.localStorage.getItem('evioLoadScreenTicks'), 10);
+        if (Number.isFinite(t) && t >= 1 && t <= 150) window.__EVIO_EXT_LOADSCREEN_TICKS__ = t;
+    } catch (e) { /* ignore */ }
 
     function isBundle(v) { return typeof v === 'string' && v.indexOf('bundle.js') !== -1; }
 
