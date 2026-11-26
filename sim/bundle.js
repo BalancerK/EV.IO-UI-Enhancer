@@ -28321,6 +28321,82 @@ var EvioSim = (() => {
       reliable: !!(rec.ws && rec.ws.reliableOrdered === true)
     };
   }
+  var PEER_IDENTITY_OPS = /* @__PURE__ */ new Set([
+    93,
+    96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
+    107,
+    108,
+    109,
+    110,
+    111,
+    112,
+    113,
+    114,
+    115,
+    116,
+    117,
+    118,
+    119,
+    120,
+    121,
+    122,
+    123,
+    125,
+    126,
+    210,
+    212,
+    231,
+    232,
+    234,
+    235,
+    236,
+    237,
+    238,
+    239,
+    240,
+    241,
+    242,
+    243
+  ]);
+  var PEER_IDENTITY_REBUILD_TICKS = 10;
+  function _peerIdentityFields(peer, tick) {
+    const c2 = peer._identityCache;
+    if (c2 && tick >= c2.tick && tick - c2.tick < PEER_IDENTITY_REBUILD_TICKS) return c2.fields;
+    let fields = [];
+    try {
+      const sp2 = _splitPlayerBlock(buildPeerBootstrapDelta(peer));
+      if (sp2) fields = sp2.filter((fl2) => fl2.filterable && PEER_IDENTITY_OPS.has(Number(fl2.key)));
+    } catch (e2) {
+      fields = [];
+    }
+    peer._identityCache = { tick, fields };
+    return fields;
+  }
+  function _withPeerIdentity(split, peer, tick) {
+    if (!split || !peer) return split;
+    const have = new Set(split.map((fl2) => fl2.key));
+    const extra = _peerIdentityFields(peer, tick).filter((fl2) => !have.has(fl2.key));
+    const ps2 = peer.playerState;
+    if (ps2 && Number.isFinite(ps2.equippedWeaponId) && !have.has("127")) {
+      const held = !!ps2._holdForPlay;
+      const w2 = [127, held ? -1 : ps2.equippedWeaponId];
+      const b2 = [128, held ? -1 : Number.isFinite(ps2.backupWeaponId) ? ps2.backupWeaponId : -1];
+      extra.push({ key: "127", tokens: w2, filterable: true, sig: JSON.stringify(w2) });
+      if (!have.has("128")) extra.push({ key: "128", tokens: b2, filterable: true, sig: JSON.stringify(b2) });
+    }
+    if (!extra.length) return split;
+    return split.concat(extra).sort((x2, y2) => parseInt(x2.key, 10) - parseInt(y2.key, 10));
+  }
   function _cachedPlayerBlock(playerId, playerState, tick, variant = "self") {
     const cacheKey = variant === "peer" ? playerId + "|peer" : playerId;
     let entry = _tickPlayerBlockCache.get(cacheKey);
@@ -28759,7 +28835,7 @@ var EvioSim = (() => {
         if (!peer || peer.playerId === playerId || !peer.accepted) continue;
         const peerEntry = _cachedPlayerBlock(peer.playerId, peer.playerState, tick, "peer");
         if (peerEntry.ok) {
-          if (delta && peerEntry.split === void 0) peerEntry.split = _splitPlayerBlock(peerEntry.block);
+          if (delta && peerEntry.split === void 0) peerEntry.split = _withPeerIdentity(_splitPlayerBlock(peerEntry.block), peer, tick);
           _deltaAppendPlayerBlock(body, peerEntry.block, delta ? peerEntry.split : null, delta);
           continue;
         }

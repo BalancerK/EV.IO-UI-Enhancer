@@ -7744,6 +7744,46 @@ function makeDeltaContext(rec, tick) {
     reliable: !!(rec.ws && rec.ws.reliableOrdered === true) };
 }
 
+// A peer's identity normally reaches a client only in its introduction (the peer bootstrap), but
+// over WebRTC that packet rides the lossy channel like every other state packet. Lose it and the
+// client builds the peer from the per-tick block alone: no name, no weapon (127 only goes out after
+// a switch), no team / bot flag / attributes, and nothing ever sends them again, so the peer stays
+// broken for the whole match (seen as enemies with no gun or name, "fixed by refreshing sometimes").
+// With the delta filter on, these fields are added to the peer's per-tick block: they cost nothing
+// while unchanged and go out with every full refresh, which repairs a lost introduction within a
+// second. Counters and the hit vectors are left out (they have their own senders).
+const PEER_IDENTITY_OPS = new Set([93, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108,
+  109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 125, 126, 210, 212, 231,
+  232, 234, 235, 236, 237, 238, 239, 240, 241, 242, 243]);
+const PEER_IDENTITY_REBUILD_TICKS = 10;
+function _peerIdentityFields(peer, tick) {
+  const c = peer._identityCache;
+  if (c && tick >= c.tick && tick - c.tick < PEER_IDENTITY_REBUILD_TICKS) return c.fields;
+  let fields = [];
+  try {
+    const sp = _splitPlayerBlock(buildPeerBootstrapDelta(peer));
+    if (sp) fields = sp.filter((fl) => fl.filterable && PEER_IDENTITY_OPS.has(Number(fl.key)));
+  } catch (e) { fields = []; }
+  peer._identityCache = { tick, fields };
+  return fields;
+}
+function _withPeerIdentity(split, peer, tick) {
+  if (!split || !peer) return split;
+  const have = new Set(split.map((fl) => fl.key));
+  const extra = _peerIdentityFields(peer, tick).filter((fl) => !have.has(fl.key));
+  const ps = peer.playerState;
+  if (ps && Number.isFinite(ps.equippedWeaponId) && !have.has("127")) {
+    const held = !!ps._holdForPlay;
+    const w = [127, held ? -1 : ps.equippedWeaponId];
+    const b = [128, held ? -1 : (Number.isFinite(ps.backupWeaponId) ? ps.backupWeaponId : -1)];
+    extra.push({ key: "127", tokens: w, filterable: true, sig: JSON.stringify(w) });
+    if (!have.has("128")) extra.push({ key: "128", tokens: b, filterable: true, sig: JSON.stringify(b) });
+  }
+  if (!extra.length) return split;
+  // The client reads a block's opcodes in ascending order, so merge, keeping each op's own order.
+  return split.concat(extra).sort((x, y) => parseInt(x.key, 10) - parseInt(y.key, 10));
+}
+
 function _cachedPlayerBlock(playerId, playerState, tick, variant = "self") {
   const cacheKey = variant === "peer" ? playerId + "|peer" : playerId;
   let entry = _tickPlayerBlockCache.get(cacheKey);
@@ -8345,7 +8385,7 @@ function buildTickBody(playerId, tick, playerState = createPlayerSimState(), pee
       // every recipient's body on a bad tick — is unchanged; only the bookkeeping got cheaper.
       const peerEntry = _cachedPlayerBlock(peer.playerId, peer.playerState, tick, "peer");
       if (peerEntry.ok) {
-        if (delta && peerEntry.split === undefined) peerEntry.split = _splitPlayerBlock(peerEntry.block);
+        if (delta && peerEntry.split === undefined) peerEntry.split = _withPeerIdentity(_splitPlayerBlock(peerEntry.block), peer, tick);
         _deltaAppendPlayerBlock(body, peerEntry.block, delta ? peerEntry.split : null, delta);
         continue;
       }
