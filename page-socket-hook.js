@@ -338,7 +338,13 @@
     window.fetch = function (input, init) {
         let url = '';
         try { url = typeof input === 'string' ? input : (input && input.url) || ''; } catch (e) { /* ignore */ }
-        const p = _nativeFetch.apply(this, arguments);
+        let method = 'GET';
+        try { method = String((init && init.method) || (input && typeof input === 'object' && input.method) || 'GET').toUpperCase(); } catch (e) { /* ignore */ }
+        const assetKey = method === 'GET' ? assetCacheKey(url) : null;
+        const args = arguments, self = this;
+        const p = assetKey
+            ? cachedFetch(assetKey, url).catch(() => _nativeFetch.apply(self, args))
+            : _nativeFetch.apply(this, arguments);
         try {
             if (/\/(me|user\/\d+)\?_format=json/.test(url)) {
                 p.then((res) => { try { res.clone().json().then(captureAccount).catch(() => {}); } catch (e) { /* ignore */ } }).catch(() => {});
@@ -348,8 +354,204 @@
         } catch (e) { /* ignore */ }
         return p;
     };
+
+    // ── Game file cache ───────────────────────────────────────────────────────────────────────
+    // ev.io serves its static game files (maps, billboard pictures, animations, sounds, textures,
+    // the skin list) with `Cache-Control: max-age=14400`: four hours, although most have not changed
+    // since 2023. After that the browser has to ask ev.io again before it can use its copy, and when
+    // Cloudflare's copy has expired too, that question reaches ev.io's own server, which is often
+    // overloaded: one 165 KB billboard took 41 s, and the game will not finish "Loading map..." until
+    // every billboard has arrived.
+    //
+    // So those files are kept here, in Cache Storage for ev.io, and served straight from it. Anything
+    // older than ASSET_REVALIDATE_MS is re-checked with ev.io in the background (a conditional
+    // request, well after the page has loaded), so an update is picked up on the next visit and a
+    // slow ev.io never holds up a join. Accounts, logins, the matchmaker and everything else are
+    // never cached. Turn it off with localStorage evioAssetCache = '0' (the Lobbies panel's toggle).
+    const ASSET_CACHE_NAME = 'evio-ext-assets-v1';
+    const ASSET_CACHE_MAX_BYTES = 800 * 1024 * 1024;
+    const ASSET_REVALIDATE_MS = 6 * 3600 * 1000;
+    const ASSET_REVALIDATE_JSON_MS = 30 * 60 * 1000;   // all-skins grows when skins are added
+    let assetCacheEnabled = true;
+    try { assetCacheEnabled = window.localStorage.getItem('evioAssetCache') !== '0'; } catch (e) { /* ignore */ }
+    const openAssetCache = () => ((typeof caches !== 'undefined' && window.isSecureContext)
+        ? caches.open(ASSET_CACHE_NAME).catch(() => null) : Promise.resolve(null));
+    let assetCacheP = openAssetCache();
+    const assetStats = { hits: 0, misses: 0 };
+
+    // The cache key for a URL the game is about to load, or null if it must not be cached.
+    function assetCacheKey(url) {
+        if (!assetCacheEnabled || !url) return null;
+        let u;
+        try { u = new URL(String(url), window.location.href); } catch (e) { return null; }
+        if (u.origin !== 'https://ev.io') return null;
+        const path = u.pathname.replace(/\/{2,}/g, '/');   // the game asks for both //sites and /sites
+        if (path.indexOf('/maps/test/') !== -1) return null;
+        if (!(path.indexOf('/sites/default/files/') === 0 || /^\/dist\/[^/]+\/public\//.test(path)
+              || path === '/all-skins')) return null;
+        return 'https://ev.io' + path + u.search;
+    }
+    async function assetMatch(key) {
+        const cache = await assetCacheP;
+        if (!cache) return null;
+        try { return (await cache.match(key)) || null; } catch (e) { return null; }
+    }
+    async function assetPut(key, body, srcHeaders) {
+        const cache = await assetCacheP;
+        if (!cache || !body) return;
+        const h = new Headers();
+        for (const n of ['content-type', 'etag', 'last-modified']) {
+            const v = srcHeaders && srcHeaders.get(n);
+            if (v) h.set(n, v);
+        }
+        h.set('x-evio-cached-at', String(Date.now()));
+        h.set('x-evio-size', String(body.size || 0));
+        try { await cache.put(key, new Response(body, { status: 200, headers: h })); } catch (e) { return; }
+        scheduleAssetPrune();
+    }
+    // Download over the network and keep a copy. Only complete, plain 200 responses are stored.
+    async function assetFetchAndStore(key, url) {
+        const r = await _nativeFetch(url, { credentials: 'same-origin' });
+        if (r.status === 200 && r.type === 'basic') {
+            const c = r.clone();
+            c.blob().then((b) => assetPut(key, b, c.headers)).catch(() => {});
+        }
+        return r;
+    }
+    // Re-check a cached file with ev.io in the background once it is old enough. At most once per key
+    // per page load, and 15-30 s later so it never competes with the join's own downloads.
+    const assetRevalidated = new Set();
+    function maybeRevalidate(key, cached) {
+        if (assetRevalidated.has(key)) return;
+        const at = Number(cached.headers.get('x-evio-cached-at')) || 0;
+        const maxAge = key.endsWith('/all-skins') ? ASSET_REVALIDATE_JSON_MS : ASSET_REVALIDATE_MS;
+        if (Date.now() - at < maxAge) return;
+        assetRevalidated.add(key);
+        const headers = {};
+        const etag = cached.headers.get('etag'), lm = cached.headers.get('last-modified');
+        if (etag) headers['If-None-Match'] = etag;
+        if (lm) headers['If-Modified-Since'] = lm;
+        setTimeout(() => {
+            _nativeFetch(key, { headers, cache: 'no-store', credentials: 'same-origin' }).then(async (r) => {
+                if (r.status === 304) await assetPut(key, await cached.blob(), cached.headers);
+                else if (r.status === 200 && r.type === 'basic') await assetPut(key, await r.blob(), r.headers);
+            }).catch(() => {});
+        }, 15000 + Math.random() * 15000);
+    }
+    async function cachedFetch(key, url) {
+        const hit = await assetMatch(key);
+        if (hit) { assetStats.hits++; maybeRevalidate(key, hit.clone()); return hit; }
+        assetStats.misses++;
+        return assetFetchAndStore(key, url);
+    }
+    // A blob: URL holding the file, from the cache or freshly downloaded (and then cached).
+    async function assetBlobUrl(key, url) {
+        let r = await assetMatch(key);
+        if (r) { assetStats.hits++; maybeRevalidate(key, r.clone()); }
+        else {
+            assetStats.misses++;
+            r = await assetFetchAndStore(key, url);
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+        }
+        const blob = await r.blob();
+        return URL.createObjectURL(blob);
+    }
+    // Keep the cache under ASSET_CACHE_MAX_BYTES, dropping the least recently refreshed files first.
+    let assetPruneTimer = null;
+    function scheduleAssetPrune() {
+        if (assetPruneTimer) return;
+        assetPruneTimer = setTimeout(async () => {
+            assetPruneTimer = null;
+            const info = await assetCacheInfo();
+            if (!info || info.bytes <= ASSET_CACHE_MAX_BYTES) return;
+            const cache = await assetCacheP;
+            let total = info.bytes;
+            for (const it of info.items.sort((a, b) => a.at - b.at)) {
+                if (total <= ASSET_CACHE_MAX_BYTES * 0.8) break;
+                try { await cache.delete(it.req); total -= it.size; } catch (e) { /* ignore */ }
+            }
+        }, 60000);
+    }
+    async function assetCacheInfo() {
+        const cache = await assetCacheP;
+        if (!cache) return null;
+        const items = [];
+        let bytes = 0;
+        for (const req of await cache.keys()) {
+            const m = await cache.match(req);
+            if (!m) continue;
+            const size = Number(m.headers.get('x-evio-size')) || 0;
+            items.push({ req, size, at: Number(m.headers.get('x-evio-cached-at')) || 0 });
+            bytes += size;
+        }
+        return { items, bytes, count: items.length };
+    }
+    // Pictures (billboards, textures, icons) are loaded by setting img.src (three.js ImageLoader),
+    // so serve those from a blob: URL. Until it is ready, reading .src gives back what was set.
+    (function hookImageSrc() {
+        const desc = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'src');
+        if (!desc || !desc.set || !desc.get) return;
+        Object.defineProperty(HTMLImageElement.prototype, 'src', {
+            configurable: true,
+            enumerable: desc.enumerable,
+            get() { return this.__evioImgPending != null ? this.__evioImgPending : desc.get.call(this); },
+            set(value) {
+                const s = String(value);
+                const key = assetCacheKey(s);
+                this.__evioImgTok = (this.__evioImgTok || 0) + 1;
+                if (!key) { this.__evioImgPending = null; desc.set.call(this, value); return; }
+                const tok = this.__evioImgTok;
+                this.__evioImgPending = s;
+                assetBlobUrl(key, s).then((blobUrl) => {
+                    if (this.__evioImgTok !== tok) { URL.revokeObjectURL(blobUrl); return; }
+                    this.__evioImgPending = null;
+                    const release = () => {
+                        this.removeEventListener('load', release);
+                        this.removeEventListener('error', release);
+                        URL.revokeObjectURL(blobUrl);
+                    };
+                    this.addEventListener('load', release);
+                    this.addEventListener('error', release);
+                    desc.set.call(this, blobUrl);
+                }, () => {
+                    if (this.__evioImgTok !== tok) return;
+                    this.__evioImgPending = null;
+                    desc.set.call(this, s);   // let the browser load it the normal way
+                });
+            },
+        });
+    })();
+    // Stats / clear / on-off for the Lobbies panel (content.js).
+    window.addEventListener('message', (event) => {
+        if (event.source !== window || event.origin !== window.location.origin) return;
+        const msg = event.data;
+        if (!msg || msg.source !== RELAY_MSG_SOURCE) return;
+        const reply = async () => {
+            const info = await assetCacheInfo();
+            window.postMessage({
+                source: HOOK_MSG_SOURCE, type: 'asset-cache-info', id: msg.id, enabled: assetCacheEnabled,
+                available: !!info, count: info ? info.count : 0, bytes: info ? info.bytes : 0,
+                hits: assetStats.hits, misses: assetStats.misses,
+            }, window.location.origin);
+        };
+        if (msg.type === 'asset-cache-stats') reply();
+        else if (msg.type === 'asset-cache-clear') {
+            (async () => {
+                try { await caches.delete(ASSET_CACHE_NAME); } catch (e) { /* ignore */ }
+                assetCacheP = openAssetCache();   // the old handle points at the deleted cache
+                reply();
+            })();
+        } else if (msg.type === 'asset-cache-enable') {
+            assetCacheEnabled = !!msg.enabled;
+            try { window.localStorage.setItem('evioAssetCache', assetCacheEnabled ? '1' : '0'); } catch (e) { /* ignore */ }
+            reply();
+        }
+    });
+
     try {
-        _nativeFetch('https://ev.io/all-skins', { headers: { Accept: 'application/json' } })
+        const skinsKey = assetCacheKey('https://ev.io/all-skins');
+        (skinsKey ? cachedFetch(skinsKey, 'https://ev.io/all-skins')
+                  : _nativeFetch('https://ev.io/all-skins', { headers: { Accept: 'application/json' } }))
             .then((r) => r.json()).then(captureSkins)
             .catch((e) => console.warn('[evio-ext] all-skins fetch failed', e));
     } catch (e) { /* ignore */ }
@@ -387,21 +589,69 @@
             window.postMessage({ source: HOOK_MSG_SOURCE, type: 'test-map-request', id, key }, window.location.origin);
         });
     }
-    if (hostingActive) {
+    // XHR: test maps (custom lobbies only) and the game file cache (everywhere). Maps, animations,
+    // sounds and the skin list all come through three.js FileLoader / Howler as a plain async XHR.
+    {
         const xhrOpen = XMLHttpRequest.prototype.open;
         const xhrSend = XMLHttpRequest.prototype.send;
         const xhrSetHeader = XMLHttpRequest.prototype.setRequestHeader;
-        XMLHttpRequest.prototype.open = function (method, url) {
-            const m = typeof url === 'string' ? TEST_MAP_URL_RE.exec(url) : null;
-            if (!m) { this.__evioTestMap = null; return xhrOpen.apply(this, arguments); }
+        XMLHttpRequest.prototype.open = function (method, url, async) {
+            this.__evioTestMap = null;
+            this.__evioAsset = null;
+            const u = typeof url === 'string' ? url : (url && url.href) || '';
+            const m = hostingActive ? TEST_MAP_URL_RE.exec(u) : null;
             // Not opened yet: send() opens it once the bytes are here. Headers set meanwhile are kept.
-            this.__evioTestMap = { key: m[1], method, url, headers: [] };
+            if (m) { this.__evioTestMap = { key: m[1], method, url: u, headers: [] }; return; }
+            const assetKey = (String(method).toUpperCase() === 'GET' && async !== false) ? assetCacheKey(u) : null;
+            if (assetKey) { this.__evioAsset = { key: assetKey, method, url: u, headers: [] }; return; }
+            return xhrOpen.apply(this, arguments);
         };
         XMLHttpRequest.prototype.setRequestHeader = function (name, value) {
-            if (this.__evioTestMap) { this.__evioTestMap.headers.push([name, value]); return; }
+            const held = this.__evioTestMap || this.__evioAsset;
+            if (held) { held.headers.push([name, value]); return; }
             return xhrSetHeader.apply(this, arguments);
         };
         XMLHttpRequest.prototype.send = function () {
+            const asset = this.__evioAsset;
+            if (asset) {
+                this.__evioAsset = null;
+                const args = arguments;
+                // Cache miss: the real request, and keep what it downloaded.
+                const network = () => {
+                    xhrOpen.call(this, asset.method, asset.url, true);
+                    for (const [n, v] of asset.headers) { try { xhrSetHeader.call(this, n, v); } catch (e) { /* ignore */ } }
+                    const onload = () => {
+                        this.removeEventListener('load', onload);
+                        try {
+                            if (this.status !== 200) return;
+                            const rt = this.responseType;
+                            const body = rt === 'arraybuffer' ? new Blob([this.response])
+                                : rt === 'blob' ? this.response
+                                : (rt === '' || rt === 'text') ? new Blob([this.responseText]) : null;
+                            if (!body) return;
+                            const h = new Headers();
+                            for (const n of ['content-type', 'etag', 'last-modified']) {
+                                const v = this.getResponseHeader(n);
+                                if (v) h.set(n, v);
+                            }
+                            assetPut(asset.key, body, h).catch(() => {});
+                        } catch (e) { /* ignore */ }
+                    };
+                    this.addEventListener('load', onload);
+                    xhrSend.apply(this, args);
+                };
+                assetMatch(asset.key).then(async (hit) => {
+                    if (!hit) { assetStats.misses++; network(); return; }
+                    assetStats.hits++;
+                    maybeRevalidate(asset.key, hit.clone());
+                    const blobUrl = URL.createObjectURL(await hit.blob());
+                    const release = () => { this.removeEventListener('loadend', release); URL.revokeObjectURL(blobUrl); };
+                    this.addEventListener('loadend', release);
+                    xhrOpen.call(this, asset.method, blobUrl, true);
+                    xhrSend.call(this);
+                }).catch(() => network());
+                return;
+            }
             const tm = this.__evioTestMap;
             if (!tm) return xhrSend.apply(this, arguments);
             this.__evioTestMap = null;

@@ -1486,6 +1486,65 @@ window.addEventListener('load', () => {
 
     // ----------------- module panel -----------------
 
+    // "Game file cache" row under the official lobby list. The cache itself lives in
+    // page-socket-hook.js (Cache Storage belongs to the page); this only asks it for its size and
+    // passes on the toggle / clear.
+    function buildAssetCacheRow() {
+        const group = document.createElement('div');
+        group.className = 'ev-field-group';
+        group.id = 'ev-asset-cache';
+        group.style.marginTop = '12px';
+        const row = document.createElement('div');
+        row.className = 'ev-field-row';
+        row.style.alignItems = 'center';
+        const label = document.createElement('label');
+        label.style.cssText = 'flex:1;display:flex;gap:8px;align-items:center;cursor:pointer;font-size:13px;';
+        const box = document.createElement('input');
+        box.type = 'checkbox';
+        box.id = 'ev-asset-cache-enabled';
+        const text = document.createElement('span');
+        text.textContent = 'Keep game files on this computer (faster loading)';
+        label.appendChild(box);
+        label.appendChild(text);
+        const clearBtn = document.createElement('button');
+        clearBtn.type = 'button';
+        clearBtn.className = 'ev-btn-reset';
+        clearBtn.id = 'ev-asset-cache-clear';
+        clearBtn.textContent = 'Clear';
+        clearBtn.style.padding = '4px 12px';
+        row.appendChild(label);
+        row.appendChild(clearBtn);
+        const hint = document.createElement('p');
+        hint.className = 'ev-field-hint';
+        hint.id = 'ev-asset-cache-status';
+        hint.textContent = 'Maps, pictures and sounds are loaded from here instead of ev.io, and checked for updates in the background.';
+        group.appendChild(row);
+        group.appendChild(hint);
+
+        let seq = 0;
+        const ask = (type, extra) => window.postMessage(
+            Object.assign({ source: 'evio-ext-isolated-relay', type, id: ++seq }, extra || {}), window.location.origin);
+        const fmt = (b) => b >= 1048576 ? (b / 1048576).toFixed(0) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB';
+        window.addEventListener('message', (event) => {
+            if (event.source !== window || event.origin !== window.location.origin) return;
+            const m = event.data;
+            if (!m || m.source !== 'evio-ext-page-hook' || m.type !== 'asset-cache-info') return;
+            box.checked = !!m.enabled;
+            clearBtn.disabled = !m.count;
+            if (!m.available) { hint.textContent = 'This browser does not allow the cache here.'; return; }
+            const stored = m.count ? `${m.count} files kept (${fmt(m.bytes)})` : 'Nothing kept yet';
+            const used = (m.hits || m.misses) ? ` · this visit: ${m.hits} loaded from here, ${m.misses} from ev.io` : '';
+            hint.textContent = (m.enabled ? stored : 'Off. ' + stored) + used;
+        });
+        box.addEventListener('change', () => ask('asset-cache-enable', { enabled: box.checked }));
+        clearBtn.addEventListener('click', () => { hint.textContent = 'Clearing...'; ask('asset-cache-clear'); });
+        // Refresh whenever the panel is shown.
+        new IntersectionObserver((entries) => { if (entries.some((e) => e.isIntersecting)) ask('asset-cache-stats'); })
+            .observe(group);
+        ask('asset-cache-stats');
+        return group;
+    }
+
     function ensureLobbyModule() {
         if (document.getElementById('ev_lobbies_module')) return;
 
@@ -1553,6 +1612,7 @@ window.addEventListener('load', () => {
 
         officialView.appendChild(toolbar);
         officialView.appendChild(list);
+        officialView.appendChild(buildAssetCacheRow());
         content.appendChild(officialView);
 
         // ----- self-hosted ("Custom") view -----
