@@ -23887,6 +23887,7 @@ var EvioSim = (() => {
     }
   }
   var PICKUP_HIDE_SENTINEL = 999999999;
+  var PICKUP_ENTRY_LEN = 14;
   function buildWeaponPickupBlock() {
     const pts = physics_world_default.pickupPoints || [];
     if (pts.length !== _pickupState.length) _resetPickupState();
@@ -23915,8 +23916,22 @@ var EvioSim = (() => {
     }
     return block;
   }
-  function flushWeaponPickups(body) {
-    const block = buildWeaponPickupBlock();
+  var _pickupBlockCache = { tick: -1, block: null };
+  function flushWeaponPickups(body, delta = null) {
+    const now = _live.globalTick || 0;
+    if (_pickupBlockCache.tick !== now || !_pickupBlockCache.block) {
+      _pickupBlockCache.tick = now;
+      _pickupBlockCache.block = buildWeaponPickupBlock();
+    }
+    let block = _pickupBlockCache.block;
+    if (delta && block.length) {
+      const kept = [];
+      for (let i2 = 0; i2 + PICKUP_ENTRY_LEN <= block.length; i2 += PICKUP_ENTRY_LEN) {
+        const entry = block.slice(i2, i2 + PICKUP_ENTRY_LEN);
+        if (_deltaInclude(delta, "#W", String(entry[1]), JSON.stringify(entry))) kept.push(...entry);
+      }
+      block = kept;
+    }
     if (block.length === 0) return;
     const insertAt = body.lastIndexOf(280);
     if (insertAt >= 0) body.splice(insertAt, 0, ...block);
@@ -27961,6 +27976,331 @@ var EvioSim = (() => {
       playerState._lastSentMultiKill = playerState.multiKill;
     }
   }
+  var DELTA_FIELDS = define({
+    key: "deltaFields",
+    env: "EVIO_DELTA_FIELDS",
+    type: "bool",
+    def: true,
+    category: "Netcode",
+    label: "Send only changed fields",
+    desc: "Per recipient, leave out a player's field when it has not changed since it was last sent (official does the same). Cuts state traffic about 4x. Off = every field, every tick."
+  }, (v2) => {
+    DELTA_FIELDS = v2;
+  });
+  var DELTA_RESEND_TICKS = define({
+    key: "deltaResendTicks",
+    env: "EVIO_DELTA_RESEND",
+    type: "int",
+    def: 4,
+    min: 1,
+    max: 20,
+    category: "Netcode",
+    label: "Re-send a changed field for (ticks)",
+    desc: "A changed field keeps going out for this many ticks, so one lost packet cannot lose it."
+  }, (v2) => {
+    DELTA_RESEND_TICKS = v2;
+  });
+  var DELTA_REFRESH_TICKS = define({
+    key: "deltaRefreshTicks",
+    env: "EVIO_DELTA_REFRESH",
+    type: "int",
+    def: 20,
+    min: 2,
+    max: 200,
+    category: "Netcode",
+    label: "Send every field once every (ticks)",
+    desc: "Full refresh period per recipient (staggered). Bounds how long any lost change can last."
+  }, (v2) => {
+    DELTA_REFRESH_TICKS = v2;
+  });
+  var DELTA_SET_OPS = /* @__PURE__ */ new Set([
+    90,
+    93,
+    96,
+    97,
+    98,
+    99,
+    100,
+    101,
+    102,
+    103,
+    104,
+    105,
+    106,
+    107,
+    108,
+    109,
+    110,
+    111,
+    112,
+    113,
+    114,
+    115,
+    116,
+    117,
+    118,
+    119,
+    120,
+    121,
+    122,
+    123,
+    124,
+    125,
+    126,
+    127,
+    128,
+    138,
+    139,
+    140,
+    141,
+    142,
+    143,
+    144,
+    151,
+    152,
+    153,
+    155,
+    156,
+    157,
+    158,
+    159,
+    160,
+    161,
+    162,
+    163,
+    164,
+    165,
+    166,
+    167,
+    168,
+    170,
+    171,
+    172,
+    173,
+    175,
+    177,
+    183,
+    185,
+    186,
+    187,
+    188,
+    189,
+    191,
+    192,
+    193,
+    194,
+    195,
+    198,
+    199,
+    200,
+    201,
+    202,
+    203,
+    204,
+    205,
+    206,
+    207,
+    208,
+    209,
+    210,
+    212,
+    214,
+    215,
+    216,
+    217,
+    218,
+    219,
+    220,
+    221,
+    222,
+    223,
+    224,
+    225,
+    226,
+    228,
+    229,
+    230,
+    231,
+    232,
+    234,
+    235,
+    236,
+    237,
+    238,
+    239,
+    240,
+    241,
+    242,
+    243
+  ]);
+  var DELTA_ALWAYS_OPS = /* @__PURE__ */ new Set([
+    91,
+    95,
+    129,
+    130,
+    145,
+    146,
+    147,
+    148,
+    149,
+    150,
+    174,
+    181,
+    182,
+    190,
+    196,
+    197,
+    227
+  ]);
+  var DELTA_COUNTER_DIR = {
+    145: 1,
+    146: 1,
+    147: 1,
+    148: 1,
+    149: 1,
+    150: 1,
+    174: 1,
+    190: 1,
+    196: 1,
+    197: 1,
+    227: 1,
+    129: -1,
+    130: -1,
+    181: -1,
+    182: -1
+  };
+  var DELTA_VEC3_OPS = /* @__PURE__ */ new Set([136, 137, 176, 178, 179, 180, 211]);
+  var DELTA_VEC3_N = { 0: 3, 1: 2, 2: 2, 3: 1, 4: 2, 5: 1, 6: 1 };
+  var DELTA_HEADER_SET = /* @__PURE__ */ new Set([8, 15, 18, 19, 25, 26, 27, 37, 42]);
+  var DELTA_TRAILER_SET = /* @__PURE__ */ new Set([280, 298, 306, 308]);
+  function _splitPlayerBlock(block) {
+    if (!Array.isArray(block) || block[0] !== 244 || block.length < 2) return null;
+    const fields = [];
+    const add = (key, tokens, filterable) => fields.push({
+      key: String(key),
+      tokens,
+      filterable,
+      sig: filterable ? JSON.stringify(tokens) : null
+    });
+    let i2 = 2;
+    while (i2 < block.length) {
+      const op2 = block[i2];
+      if (typeof op2 !== "number" || op2 === 244) return null;
+      if (op2 === 135) {
+        if (block[i2 + 1] === -1) {
+          add("135-" + block[i2 + 2], block.slice(i2, i2 + 3), false);
+          i2 += 3;
+          continue;
+        }
+        let j2 = i2 + 2;
+        while (j2 < block.length && (block[j2] === 132 || block[j2] === 133 || block[j2] === 134)) j2 += 2;
+        add("135:" + block[i2 + 1], block.slice(i2, j2), true);
+        i2 = j2;
+        continue;
+      }
+      if (DELTA_VEC3_OPS.has(op2)) {
+        const n3 = DELTA_VEC3_N[block[i2 + 1]];
+        if (n3 === void 0 || i2 + 2 + n3 > block.length) return null;
+        add(op2, block.slice(i2, i2 + 2 + n3), true);
+        i2 += 2 + n3;
+        continue;
+      }
+      if (DELTA_SET_OPS.has(op2)) {
+        add(op2, block.slice(i2, i2 + 2), true);
+        i2 += 2;
+        continue;
+      }
+      if (DELTA_ALWAYS_OPS.has(op2)) {
+        add(op2, block.slice(i2, i2 + 2), false);
+        if (DELTA_COUNTER_DIR[op2] && typeof block[i2 + 1] === "number") fields[fields.length - 1].counter = DELTA_COUNTER_DIR[op2];
+        i2 += 2;
+        continue;
+      }
+      return null;
+    }
+    return fields;
+  }
+  function _deltaInclude(ctx, eid, key, sig) {
+    const sent = ctx.rec._deltaSent && ctx.rec._deltaSent.get(eid);
+    const prev = sent && sent.get(key);
+    if (!prev || prev.sig !== sig) {
+      ctx.pending.push([eid, key, { sig, until: ctx.tick + DELTA_RESEND_TICKS }]);
+      return true;
+    }
+    return ctx.full || ctx.tick <= prev.until;
+  }
+  function _deltaIncludeCounter(ctx, eid, key, value, dir) {
+    const sent = ctx.rec._deltaSent && ctx.rec._deltaSent.get(eid);
+    const prev = sent && sent.get(key);
+    const omit = !ctx.full && prev && prev.cv !== void 0 && value === prev.cv + dir;
+    ctx.pending.push([eid, key, { cv: value }]);
+    return !omit;
+  }
+  function _deltaAppendPlayerBlock(out, block, split, ctx) {
+    if (!ctx || !split) {
+      for (let i2 = 0; i2 < block.length; i2++) out.push(block[i2]);
+      return;
+    }
+    const eid = String(block[1]);
+    out.push(244, block[1]);
+    for (const f2 of split) {
+      const inc = f2.filterable ? _deltaInclude(ctx, eid, f2.key, f2.sig) : f2.counter && ctx.reliable ? _deltaIncludeCounter(ctx, eid, f2.key, f2.tokens[1], f2.counter) : true;
+      if (inc) {
+        for (let k2 = 0; k2 < f2.tokens.length; k2++) out.push(f2.tokens[k2]);
+      }
+      if (!f2.filterable && f2.key.startsWith("135-")) ctx.pending.push([eid, "135:" + f2.key.slice(4), null]);
+    }
+  }
+  function commitDeltaContext(ctx) {
+    if (!ctx) return;
+    if (!ctx.pending.length) {
+      _deltaApplyForgets(ctx.rec);
+      return;
+    }
+    const rec = ctx.rec;
+    if (!rec._deltaSent) rec._deltaSent = /* @__PURE__ */ new Map();
+    for (const [eid, key, st2] of ctx.pending) {
+      let m2 = rec._deltaSent.get(eid);
+      if (st2 === null) {
+        if (m2) m2.delete(key);
+        continue;
+      }
+      if (!m2) {
+        m2 = /* @__PURE__ */ new Map();
+        rec._deltaSent.set(eid, m2);
+      }
+      m2.set(key, st2);
+    }
+    _deltaApplyForgets(rec);
+  }
+  function _deltaForgetLater(rec, eid) {
+    if (!rec) return;
+    (rec._deltaForget || (rec._deltaForget = [])).push(String(eid));
+  }
+  function _deltaApplyForgets(rec) {
+    if (!rec._deltaForget || !rec._deltaForget.length) return;
+    if (rec._deltaSent) for (const eid of rec._deltaForget) rec._deltaSent.delete(eid);
+    rec._deltaForget.length = 0;
+  }
+  function resetDeltaState(rec, eid) {
+    if (!rec) return;
+    if (eid === void 0) {
+      rec._deltaSent = /* @__PURE__ */ new Map();
+      if (rec._deltaForget) rec._deltaForget.length = 0;
+    } else if (rec._deltaSent) rec._deltaSent.delete(String(eid));
+  }
+  function makeDeltaContext(rec, tick) {
+    if (!DELTA_FIELDS || !rec) return null;
+    if (!Number.isFinite(rec._deltaPhase)) rec._deltaPhase = Math.floor(Math.random() * 1e3);
+    if (!rec._deltaSent) rec._deltaSent = /* @__PURE__ */ new Map();
+    return {
+      rec,
+      tick,
+      full: (tick + rec._deltaPhase) % DELTA_REFRESH_TICKS === 0,
+      pending: [],
+      reliable: !!(rec.ws && rec.ws.reliableOrdered === true)
+    };
+  }
   function _cachedPlayerBlock(playerId, playerState, tick, variant = "self") {
     const cacheKey = variant === "peer" ? playerId + "|peer" : playerId;
     let entry = _tickPlayerBlockCache.get(cacheKey);
@@ -28336,7 +28676,7 @@ var EvioSim = (() => {
       body.push(228, playerState.killStreak | 0, 229, playerState.multiKill | 0);
     }
   }
-  function buildTickBody(playerId, tick, playerState = createPlayerSimState(), peerSessions = null) {
+  function buildTickBody(playerId, tick, playerState = createPlayerSimState(), peerSessions = null, delta = null) {
     const header = /* @__PURE__ */ new Map();
     header.set(1, tick);
     header.set(4, tick);
@@ -28353,7 +28693,11 @@ var EvioSim = (() => {
     header.set(37, true);
     header.set(42, Math.max(1, Math.round(1e3 / TICK_MS)));
     const body = [];
-    for (const op2 of [...header.keys()].sort((a2, b2) => a2 - b2)) body.push(op2, header.get(op2));
+    for (const op2 of [...header.keys()].sort((a2, b2) => a2 - b2)) {
+      const val = header.get(op2);
+      if (delta && DELTA_HEADER_SET.has(op2) && !_deltaInclude(delta, "#H", String(op2), JSON.stringify(val))) continue;
+      body.push(op2, val);
+    }
     const bullets = buildBulletBlock();
     if (bullets.length) body.push(...bullets);
     const hitEvents = buildPlayerMapBlock();
@@ -28361,13 +28705,14 @@ var EvioSim = (() => {
     if (peerSessions && typeof peerSessions.values === "function") {
       const selfEntry = _cachedPlayerBlock(playerId, playerState, tick);
       if (!selfEntry.ok) throw selfEntry.err;
-      for (let i2 = 0; i2 < selfEntry.block.length; i2++) body.push(selfEntry.block[i2]);
+      if (delta && selfEntry.split === void 0) selfEntry.split = _splitPlayerBlock(selfEntry.block);
+      _deltaAppendPlayerBlock(body, selfEntry.block, delta ? selfEntry.split : null, delta);
       for (const peer of peerSessions.values()) {
         if (!peer || peer.playerId === playerId || !peer.accepted) continue;
         const peerEntry = _cachedPlayerBlock(peer.playerId, peer.playerState, tick, "peer");
         if (peerEntry.ok) {
-          const blk = peerEntry.block;
-          for (let i2 = 0; i2 < blk.length; i2++) body.push(blk[i2]);
+          if (delta && peerEntry.split === void 0) peerEntry.split = _splitPlayerBlock(peerEntry.block);
+          _deltaAppendPlayerBlock(body, peerEntry.block, delta ? peerEntry.split : null, delta);
           continue;
         }
         {
@@ -28386,10 +28731,14 @@ var EvioSim = (() => {
     } else {
       appendPlayerTickBody(body, playerId, playerState);
     }
+    const trailer = (op2, val) => {
+      if (delta && DELTA_TRAILER_SET.has(op2) && !_deltaInclude(delta, "#T", String(op2), JSON.stringify(val))) return;
+      body.push(op2, val);
+    };
     body.push(280, ROUNDS_ENABLED ? match.gameMode : GAME_PHASE);
-    body.push(298, match.roundStartTick);
-    body.push(306, GAME_MODE === "survival" && survivalState.activeSpecialWave ? survivalState.activeSpecialWave.name : null);
-    if (match.teleporterUseTicks.length) body.push(308, match.teleporterUseTicks);
+    trailer(298, match.roundStartTick);
+    trailer(306, GAME_MODE === "survival" && survivalState.activeSpecialWave ? survivalState.activeSpecialWave.name : null);
+    if (match.teleporterUseTicks.length) trailer(308, match.teleporterUseTicks);
     return body;
   }
   function extractPlayerSpawnDelta(body) {
@@ -28496,6 +28845,8 @@ var EvioSim = (() => {
       else body.push(...session.pendingPeerBootstraps);
     }
     console.log(`[evio-local] flushed peer-spawn for ${session.playerId}: ops=${session.pendingPeerBootstraps.length}`);
+    const pb = session.pendingPeerBootstraps;
+    for (let i2 = 0; i2 + 3 < pb.length; i2++) if (pb[i2] === 244 && pb[i2 + 2] === 90 && pb[i2 + 3] === pb[i2 + 1]) _deltaForgetLater(session, pb[i2 + 1]);
     session.pendingPeerBootstraps = [];
   }
   function flushPendingPeerRemovals(session, body) {
@@ -28504,6 +28855,7 @@ var EvioSim = (() => {
     const ops = [];
     for (const [playerId, ticksLeft] of rem) {
       ops.push(244, -1, playerId);
+      _deltaForgetLater(session, playerId);
       if (ticksLeft <= 1) rem.delete(playerId);
       else rem.set(playerId, ticksLeft - 1);
     }
@@ -30440,9 +30792,11 @@ var EvioSim = (() => {
         }
         s2._backpressureTicks = 0;
         let body;
+        let deltaCtx = null;
         try {
           if (s2.pendingFullBootstrap) {
             s2.pendingFullBootstrap = false;
+            resetDeltaState(s2);
             body = buildFirstSpawnBody({
               tick: globalTick,
               playerId: s2.playerId,
@@ -30491,14 +30845,15 @@ var EvioSim = (() => {
             appendPeerBootstraps(body, sessions, s2.playerId);
             console.log(`[evio-local] full re-bootstrap -> ${s2.playerId} (round ${match.round}, map generation ${match.mapGeneration})`);
           } else {
-            body = buildTickBody(s2.playerId, globalTick, s2.playerState, sessions);
+            deltaCtx = makeDeltaContext(s2, globalTick);
+            body = buildTickBody(s2.playerId, globalTick, s2.playerState, sessions, deltaCtx);
           }
           const _hasOneShot = s2.pendingPeerBootstraps && s2.pendingPeerBootstraps.length > 0 || s2.pendingPeerRemovals && s2.pendingPeerRemovals.length > 0 || s2.loadoutDeltaSendCount > 0;
           flushPendingPeerBootstraps(s2, body);
           flushPendingPeerRemovals(s2, body);
           flushLoadoutDelta(s2, s2.playerState, body);
           flushActiveEntities(body);
-          flushWeaponPickups(body);
+          flushWeaponPickups(body, deltaCtx);
           let echoTick2;
           if (TICK_MODEL === "buffer") {
             echoTick2 = s2.lastProcessedClientTick > 0 ? s2.lastProcessedClientTick : -1;
@@ -30528,6 +30883,7 @@ var EvioSim = (() => {
           s2._legacySyncTick = globalTick;
           {
             totalBytes += sendState(s2.ws, [computeSyncValue(s2), echoTick2, body]);
+            commitDeltaContext(deltaCtx);
             recipients++;
             if (s2._sendCredit > 0) s2._sendCredit -= 1;
           }

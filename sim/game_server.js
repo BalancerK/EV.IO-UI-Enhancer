@@ -1939,6 +1939,7 @@ const PICKUP_HIDE_SENTINEL = 999999999;
 // ONCE and then live forever (until a map switch tears down the client's whole world state
 // anyway); availability toggles by varying opcode 273 (Qwqshlj) between 0 (already in the past —
 // visible) and PICKUP_HIDE_SENTINEL (always in the future — hidden), never by removing the entry.
+const PICKUP_ENTRY_LEN = 14;   // tokens per point in buildWeaponPickupBlock
 function buildWeaponPickupBlock() {
   const pts = bpw.pickupPoints || [];
   if (pts.length !== _pickupState.length) _resetPickupState();
@@ -1973,15 +1974,32 @@ function buildWeaponPickupBlock() {
     // by the client once this is >=0, so they're harmless left as whatever they currently are.
     // See SURVIVAL_ITEM_INDEX's own comment for the full mechanism.
     block.push(278, i, 270, i, 271, st.weaponTypeId, 272, Number.isFinite(st.itemIndex) ? st.itemIndex : -1,
-      273, hidden ? PICKUP_HIDE_SENTINEL : 0, 274, glowIndex, 275, null);
+      273, hidden ? PICKUP_HIDE_SENTINEL : 0, 274, glowIndex, 275, null);   // PICKUP_ENTRY_LEN tokens
   }
   return block;
 }
 
 // Splice the weapon-pickup block in just before opcode 280, same slot activeEntities uses (order
 // between the two doesn't matter to the decoder — both are simple keyed maps scanned independently).
-function flushWeaponPickups(body) {
-  const block = buildWeaponPickupBlock();
+// Built once per tick (it is the same for everyone), then filtered per recipient: a point's entry
+// only goes out when it changed, inside the re-send window, or on a full refresh. The client keeps
+// an entry it is not told about (only 278,-1,i deletes one), so leaving it out keeps it as it was.
+const _pickupBlockCache = { tick: -1, block: null };
+function flushWeaponPickups(body, delta = null) {
+  const now = _live.globalTick || 0;
+  if (_pickupBlockCache.tick !== now || !_pickupBlockCache.block) {
+    _pickupBlockCache.tick = now;
+    _pickupBlockCache.block = buildWeaponPickupBlock();
+  }
+  let block = _pickupBlockCache.block;
+  if (delta && block.length) {
+    const kept = [];
+    for (let i = 0; i + PICKUP_ENTRY_LEN <= block.length; i += PICKUP_ENTRY_LEN) {
+      const entry = block.slice(i, i + PICKUP_ENTRY_LEN);
+      if (_deltaInclude(delta, "#W", String(entry[1]), JSON.stringify(entry))) kept.push(...entry);
+    }
+    block = kept;
+  }
   if (block.length === 0) return;
   const insertAt = body.lastIndexOf(280);
   if (insertAt >= 0) body.splice(insertAt, 0, ...block);
@@ -7549,6 +7567,172 @@ function _updateStatsSendWindow(playerState, tick) {
   }
 }
 
+// ── Send only what changed, per recipient ─────────────────────────────────────────────────────
+// We used to send every field of every player on every tick: ~3.2 KB a packet, ~63 KB/s per
+// player with 8 in a lobby, where official sends ~13 KB/s (measured: a real client in an official
+// Asia lobby vs the same play on our server). Official sends a field only when it changes, which
+// the client supports field by field: for a "set" field a missing value means "keep the last one"
+// (the decoder copies the previous server state and only overwrites what is present).
+//
+// Official can rely on that because its WebSocket never loses a packet. Ours may (WebRTC peers get
+// state over an unreliable channel), so a changed field is re-sent for DELTA_RESEND_TICKS ticks,
+// and every field goes out once every DELTA_REFRESH_TICKS ticks (staggered per recipient), which
+// bounds any loss to a second. What is remembered is what was actually SENT to this recipient: the
+// filter proposes, and the send path commits only when the packet really goes out (the rate gate
+// skips some ticks).
+//
+// Never filtered: counters whose missing value means ++ or -- (leaving one out is only right if the
+// value really moved by exactly one, and a lost packet would leave it off by one), the weapon-slot
+// removals, and 91/95 (each 1 byte; a comment on appendPlayerTickBody records the client needing
+// them per tick, although official does not send them). A block holding anything unexpected is sent
+// whole.
+let DELTA_FIELDS = S.define({
+  key: "deltaFields", env: "EVIO_DELTA_FIELDS", type: "bool", def: true,
+  category: "Netcode", label: "Send only changed fields",
+  desc: "Per recipient, leave out a player's field when it has not changed since it was last sent "
+      + "(official does the same). Cuts state traffic about 4x. Off = every field, every tick.",
+}, (v) => { DELTA_FIELDS = v; });
+let DELTA_RESEND_TICKS = S.define({
+  key: "deltaResendTicks", env: "EVIO_DELTA_RESEND", type: "int", def: 4, min: 1, max: 20,
+  category: "Netcode", label: "Re-send a changed field for (ticks)",
+  desc: "A changed field keeps going out for this many ticks, so one lost packet cannot lose it.",
+}, (v) => { DELTA_RESEND_TICKS = v; });
+let DELTA_REFRESH_TICKS = S.define({
+  key: "deltaRefreshTicks", env: "EVIO_DELTA_REFRESH", type: "int", def: 20, min: 2, max: 200,
+  category: "Netcode", label: "Send every field once every (ticks)",
+  desc: "Full refresh period per recipient (staggered). Bounds how long any lost change can last.",
+}, (v) => { DELTA_REFRESH_TICKS = v; });
+
+// Player fields whose missing value means "keep" (client decoder, 1-7-1), minus 91/95.
+const DELTA_SET_OPS = new Set([90, 93, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108,
+  109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128,
+  138, 139, 140, 141, 142, 143, 144, 151, 152, 153, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164,
+  165, 166, 167, 168, 170, 171, 172, 173, 175, 177, 183, 185, 186, 187, 188, 189, 191, 192, 193, 194,
+  195, 198, 199, 200, 201, 202, 203, 204, 205, 206, 207, 208, 209, 210, 212, 214, 215, 216, 217, 218,
+  219, 220, 221, 222, 223, 224, 225, 226, 228, 229, 230, 231, 232, 234, 235, 236, 237, 238, 239, 240,
+  241, 242, 243]);
+// Always sent: ++/-- counters, plus 91 and 95.
+const DELTA_ALWAYS_OPS = new Set([91, 95, 129, 130, 145, 146, 147, 148, 149, 150, 174, 181, 182, 190, 196,
+  197, 227]);
+// The ++/-- counters and their direction. Over a RELIABLE, in-order connection (a real WebSocket)
+// a counter is left out when its value is exactly what the client will compute by itself (its last
+// value moved by one per packet it RECEIVES), which is what official does. Over an unreliable one
+// (WebRTC peers) a lost packet would leave it off by one, so they keep getting it every tick.
+const DELTA_COUNTER_DIR = { 145: 1, 146: 1, 147: 1, 148: 1, 149: 1, 150: 1, 174: 1, 190: 1, 196: 1, 197: 1,
+  227: 1, 129: -1, 130: -1, 181: -1, 182: -1 };
+// Vector fields: a mode, then that many components (missing components also mean "keep").
+const DELTA_VEC3_OPS = new Set([136, 137, 176, 178, 179, 180, 211]);
+const DELTA_VEC3_N = { 0: 3, 1: 2, 2: 2, 3: 1, 4: 2, 5: 1, 6: 1 };
+// Header / trailer fields that are "set" (1, 4 = tick and 7 = round timer count on by themselves).
+const DELTA_HEADER_SET = new Set([8, 15, 18, 19, 25, 26, 27, 37, 42]);
+const DELTA_TRAILER_SET = new Set([280, 298, 306, 308]);
+
+// Split one player block into fields: [{ key, sig, tokens, filterable }]. null = do not filter it.
+// Cached on the block-cache entry, so a block is split once per tick however many recipients.
+function _splitPlayerBlock(block) {
+  if (!Array.isArray(block) || block[0] !== 244 || block.length < 2) return null;
+  const fields = [];
+  const add = (key, tokens, filterable) => fields.push({
+    key: String(key), tokens, filterable, sig: filterable ? JSON.stringify(tokens) : null,
+  });
+  let i = 2;
+  while (i < block.length) {
+    const op = block[i];
+    if (typeof op !== "number" || op === 244) return null;
+    if (op === 135) {
+      if (block[i + 1] === -1) { add("135-" + block[i + 2], block.slice(i, i + 3), false); i += 3; continue; }
+      let j = i + 2;
+      while (j < block.length && (block[j] === 132 || block[j] === 133 || block[j] === 134)) j += 2;
+      add("135:" + block[i + 1], block.slice(i, j), true);
+      i = j;
+      continue;
+    }
+    if (DELTA_VEC3_OPS.has(op)) {
+      const n = DELTA_VEC3_N[block[i + 1]];
+      if (n === undefined || i + 2 + n > block.length) return null;
+      add(op, block.slice(i, i + 2 + n), true);
+      i += 2 + n;
+      continue;
+    }
+    if (DELTA_SET_OPS.has(op)) { add(op, block.slice(i, i + 2), true); i += 2; continue; }
+    if (DELTA_ALWAYS_OPS.has(op)) {
+      add(op, block.slice(i, i + 2), false);
+      if (DELTA_COUNTER_DIR[op] && typeof block[i + 1] === "number") fields[fields.length - 1].counter = DELTA_COUNTER_DIR[op];
+      i += 2;
+      continue;
+    }
+    return null;   // something this filter does not know: send the block whole
+  }
+  return fields;
+}
+
+// Should this (entity, field) go out to this recipient? Records the proposed new "sent" state.
+function _deltaInclude(ctx, eid, key, sig) {
+  const sent = ctx.rec._deltaSent && ctx.rec._deltaSent.get(eid);
+  const prev = sent && sent.get(key);
+  if (!prev || prev.sig !== sig) { ctx.pending.push([eid, key, { sig, until: ctx.tick + DELTA_RESEND_TICKS }]); return true; }
+  return ctx.full || ctx.tick <= prev.until;
+}
+// A counter: leave it out only when the client will arrive at this exact value by itself.
+function _deltaIncludeCounter(ctx, eid, key, value, dir) {
+  const sent = ctx.rec._deltaSent && ctx.rec._deltaSent.get(eid);
+  const prev = sent && sent.get(key);
+  const omit = !ctx.full && prev && prev.cv !== undefined && value === prev.cv + dir;
+  ctx.pending.push([eid, key, { cv: value }]);
+  return !omit;
+}
+function _deltaAppendPlayerBlock(out, block, split, ctx) {
+  if (!ctx || !split) { for (let i = 0; i < block.length; i++) out.push(block[i]); return; }
+  const eid = String(block[1]);
+  out.push(244, block[1]);
+  for (const f of split) {
+    const inc = f.filterable ? _deltaInclude(ctx, eid, f.key, f.sig)
+      : (f.counter && ctx.reliable) ? _deltaIncludeCounter(ctx, eid, f.key, f.tokens[1], f.counter)
+      : true;
+    if (inc) {
+      for (let k = 0; k < f.tokens.length; k++) out.push(f.tokens[k]);
+    }
+    // A removed weapon must be sent in full if it ever comes back.
+    if (!f.filterable && f.key.startsWith("135-")) ctx.pending.push([eid, "135:" + f.key.slice(4), null]);
+  }
+}
+// Called once the packet has really been sent.
+function commitDeltaContext(ctx) {
+  if (!ctx) return;
+  if (!ctx.pending.length) { _deltaApplyForgets(ctx.rec); return; }
+  const rec = ctx.rec;
+  if (!rec._deltaSent) rec._deltaSent = new Map();
+  for (const [eid, key, st] of ctx.pending) {
+    let m = rec._deltaSent.get(eid);
+    if (st === null) { if (m) m.delete(key); continue; }
+    if (!m) { m = new Map(); rec._deltaSent.set(eid, m); }
+    m.set(key, st);
+  }
+  _deltaApplyForgets(rec);
+}
+function _deltaForgetLater(rec, eid) {
+  if (!rec) return;
+  (rec._deltaForget || (rec._deltaForget = [])).push(String(eid));
+}
+function _deltaApplyForgets(rec) {
+  if (!rec._deltaForget || !rec._deltaForget.length) return;
+  if (rec._deltaSent) for (const eid of rec._deltaForget) rec._deltaSent.delete(eid);
+  rec._deltaForget.length = 0;
+}
+// Forget what this recipient was sent (it is getting a full bootstrap), or one entity of it.
+function resetDeltaState(rec, eid) {
+  if (!rec) return;
+  if (eid === undefined) { rec._deltaSent = new Map(); if (rec._deltaForget) rec._deltaForget.length = 0; }
+  else if (rec._deltaSent) rec._deltaSent.delete(String(eid));
+}
+function makeDeltaContext(rec, tick) {
+  if (!DELTA_FIELDS || !rec) return null;
+  if (!Number.isFinite(rec._deltaPhase)) rec._deltaPhase = Math.floor(Math.random() * 1000);
+  if (!rec._deltaSent) rec._deltaSent = new Map();
+  return { rec, tick, full: (tick + rec._deltaPhase) % DELTA_REFRESH_TICKS === 0, pending: [],
+    reliable: !!(rec.ws && rec.ws.reliableOrdered === true) };
+}
+
 function _cachedPlayerBlock(playerId, playerState, tick, variant = "self") {
   const cacheKey = variant === "peer" ? playerId + "|peer" : playerId;
   let entry = _tickPlayerBlockCache.get(cacheKey);
@@ -7989,7 +8173,7 @@ function appendPlayerTickBody(body, playerId, playerState = createPlayerSimState
   }
 }
 
-function buildTickBody(playerId, tick, playerState = createPlayerSimState(), peerSessions = null) {
+function buildTickBody(playerId, tick, playerState = createPlayerSimState(), peerSessions = null, delta = null) {
   // IMPORTANT: opcode 280 (Qbu40n9 / game phase) MUST come AFTER all 244 entity
   // blocks.  The client delta decoder (Qpdy7i3) is a single forward scan: it
   // enters the `for (; 244 === n[a]; )` entity loop at a specific scan position.
@@ -8061,7 +8245,11 @@ function buildTickBody(playerId, tick, playerState = createPlayerSimState(), pee
   header.set(42, Math.max(1, Math.round(1000 / TICK_MS)));
 
   const body = [];
-  for (const op of [...header.keys()].sort((a, b) => a - b)) body.push(op, header.get(op));
+  for (const op of [...header.keys()].sort((a, b) => a - b)) {
+    const val = header.get(op);
+    if (delta && DELTA_HEADER_SET.has(op) && !_deltaInclude(delta, "#H", String(op), JSON.stringify(val))) continue;
+    body.push(op, val);
+  }
 
   // Bullet/tracer block (55) then hit-event block (67) — both decoded right after the header and
   // BEFORE the 244 player blocks (decoder order: bulletMap → playerMap → … → 244). Empty when idle.
@@ -8083,7 +8271,8 @@ function buildTickBody(playerId, tick, playerState = createPlayerSimState(), pee
     // stricter isolation than a peer failure gets, and one this must not weaken.
     const selfEntry = _cachedPlayerBlock(playerId, playerState, tick);
     if (!selfEntry.ok) throw selfEntry.err;
-    for (let i = 0; i < selfEntry.block.length; i++) body.push(selfEntry.block[i]);
+    if (delta && selfEntry.split === undefined) selfEntry.split = _splitPlayerBlock(selfEntry.block);
+    _deltaAppendPlayerBlock(body, selfEntry.block, delta ? selfEntry.split : null, delta);
     for (const peer of peerSessions.values()) {
       // Skip sessions that have not JOINED yet. A session enters `sessions` the moment its
       // WebSocket connects, which is a full network round trip before its join payload (and
@@ -8118,8 +8307,8 @@ function buildTickBody(playerId, tick, playerState = createPlayerSimState(), pee
       // every recipient's body on a bad tick — is unchanged; only the bookkeeping got cheaper.
       const peerEntry = _cachedPlayerBlock(peer.playerId, peer.playerState, tick, "peer");
       if (peerEntry.ok) {
-        const blk = peerEntry.block;
-        for (let i = 0; i < blk.length; i++) body.push(blk[i]);
+        if (delta && peerEntry.split === undefined) peerEntry.split = _splitPlayerBlock(peerEntry.block);
+        _deltaAppendPlayerBlock(body, peerEntry.block, delta ? peerEntry.split : null, delta);
         continue;
       }
       {
@@ -8140,24 +8329,30 @@ function buildTickBody(playerId, tick, playerState = createPlayerSimState(), pee
     appendPlayerTickBody(body, playerId, playerState);
   }
 
+  // Trailer fields are "set" too; filtered like the header when a delta context is given.
+  const trailer = (op, val) => {
+    if (delta && DELTA_TRAILER_SET.has(op) && !_deltaInclude(delta, "#T", String(op), JSON.stringify(val))) return;
+    body.push(op, val);
+  };
   // 280 goes last — after all 244 entity blocks, matching buildFirstSpawnBody.
+  // (Always sent: every flusher inserts its blocks before the LAST 280, so it must be present.)
   body.push(280, ROUNDS_ENABLED ? match.gameMode : GAME_PHASE);
   // 298 Qpa5f8z — the tick the current round started. 298 > 280 numerically so it rides here, in
   // the post-entity-loop ascending trailer, not the pre-loop header. Survival's own HUD ("Wave
   // {N} spawns in {time}", "{N} bots alive") computes elapsed round time from this entirely
   // client-side — see match.roundStartTick's own comment. Sent every tick (not bootstrap-only)
   // so it's never stale even if a client missed the bootstrap packet somehow.
-  body.push(298, match.roundStartTick);
+  trailer(298, match.roundStartTick);
   // 306 Qvio95c — the active special wave's name, or null when none. The client turns this
   // straight into the "Special wave spawning: X" chat line and the #special_wave_info text on
   // its own — see tickSurvivalWaves/SPECIAL_WAVE_TYPES. 306 > 298 so it rides here too.
-  body.push(306, GAME_MODE === "survival" && survivalState.activeSpecialWave
+  trailer(306, GAME_MODE === "survival" && survivalState.activeSpecialWave
     ? survivalState.activeSpecialWave.name : null);
   // 308 Qi3xpyi — per-teleporter last-used tick, driving the client's portal burst effect. It
   // decodes AFTER the 244 player loop (bundle :66224 vs :65808), so unlike the rest of the world
   // state it cannot ride in the header: the client's single ascending scan would stall on it and
   // silently drop every player block. Stays absent until a portal is actually used.
-  if (match.teleporterUseTicks.length) body.push(308, match.teleporterUseTicks);
+  if (match.teleporterUseTicks.length) trailer(308, match.teleporterUseTicks);
 
   return body;
 }
@@ -8308,6 +8503,9 @@ function flushPendingPeerBootstraps(session, body) {
     else body.push(...session.pendingPeerBootstraps);
   }
   console.log(`[evio-local] flushed peer-spawn for ${session.playerId}: ops=${session.pendingPeerBootstraps.length}`);
+  // Their entities are (re)built from these bootstraps: forget what this recipient was sent for them.
+  const pb = session.pendingPeerBootstraps;
+  for (let i = 0; i + 3 < pb.length; i++) if (pb[i] === 244 && pb[i + 2] === 90 && pb[i + 3] === pb[i + 1]) _deltaForgetLater(session, pb[i + 1]);
   session.pendingPeerBootstraps = [];
 }
 
@@ -8325,6 +8523,7 @@ function flushPendingPeerRemovals(session, body) {
   const ops = [];
   for (const [playerId, ticksLeft] of rem) {
     ops.push(244, -1, playerId);
+    _deltaForgetLater(session, playerId);   // the client deletes the entity
     if (ticksLeft <= 1) rem.delete(playerId);
     else rem.set(playerId, ticksLeft - 1);
   }
@@ -10710,6 +10909,7 @@ function startServer() {
       // read it, and a `let` inside the try is not in scope in either — which would have turned any
       // contained fault into a ReferenceError from inside the error handler itself.
       let body;
+      let deltaCtx = null;   // per-recipient field filter for this tick (see DELTA_FIELDS)
       try {
 
       // ── Full re-bootstrap after a map reload ────────────────────────────
@@ -10726,6 +10926,7 @@ function startServer() {
       // (the historical duplicate-tick crash).
       if (s.pendingFullBootstrap) {
         s.pendingFullBootstrap = false;
+        resetDeltaState(s);   // the client rebuilds every entity from this body
         body = buildFirstSpawnBody({
           tick: globalTick,
           playerId: s.playerId,
@@ -10775,7 +10976,8 @@ function startServer() {
         console.log(`[evio-local] full re-bootstrap -> ${s.playerId} (round ${match.round}, `
           + `map generation ${match.mapGeneration})`);
       } else {
-        body = buildTickBody(s.playerId, globalTick, s.playerState, sessions);
+        deltaCtx = makeDeltaContext(s, globalTick);
+        body = buildTickBody(s.playerId, globalTick, s.playerState, sessions, deltaCtx);
       }
 
       // ── Flush queued peer bootstrap deltas + departures ───────────────────
@@ -10796,7 +10998,7 @@ function startServer() {
       flushPendingPeerRemovals(s, body);
       flushLoadoutDelta(s, s.playerState, body);
       flushActiveEntities(body);   // thrown grenades (268 block) — after the 244 loadout delta
-      flushWeaponPickups(body);    // weapon pickup spawn points (278 block)
+      flushWeaponPickups(body, deltaCtx);    // weapon pickup spawn points (278 block)
 
       // Echo the latest known clientTick on every tick.
       // The reconciler tolerates repeated echoes — when the ring entry for ct=N
@@ -10922,6 +11124,7 @@ function startServer() {
       // rejects values it cannot represent. This closes the try opened before the body build.
       {
         totalBytes += sendState(s.ws, [computeSyncValue(s), echoTick, body]);
+        commitDeltaContext(deltaCtx);   // only now is it what this recipient was sent
         recipients++;
         // Spend one credit per packet, so sends can never outpace the client ticks that funded them.
         if (s._sendCredit > 0) s._sendCredit -= 1;
