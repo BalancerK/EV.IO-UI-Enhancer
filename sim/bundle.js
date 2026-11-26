@@ -21921,6 +21921,16 @@ var EvioSim = (() => {
   var IMAGE_URL_RE = /^https:\/\/ev\.io\/sites\/default\/files\/[A-Za-z0-9._%\/-]+\.(png|jpe?g)$/i;
   var _extra = [];
   var _merged = null;
+  var EFFECT_FLAGS = ["lightning", "rain", "snow", "dust", "wind"];
+  function effectsFromNames(names) {
+    const out = { lightning: false, rain: false, snow: false, dust: false, wind: false };
+    for (const n3 of names || []) {
+      const k2 = String(n3 || "").trim().toLowerCase();
+      if (EFFECT_FLAGS.includes(k2)) out[k2] = true;
+    }
+    return out;
+  }
+  var AMBIENT_URL_RE = /^https:\/\/ev\.io\/sites\/default\/files\/ambient_tracks\/[\w.%-]+\.(ogg|mp3)$/i;
   function parseExtraList(raw) {
     if (!raw || typeof raw !== "object" || !Array.isArray(raw.maps)) throw new Error("not an extra-maps list");
     const out = [];
@@ -21938,6 +21948,8 @@ var EvioSim = (() => {
         evmapUrl: m2.evmapUrl,
         thumbUrl: img(m2.thumbUrl),
         largeImageUrl: img(m2.largeImageUrl),
+        ambientUrl: typeof m2.ambientUrl === "string" && AMBIENT_URL_RE.test(m2.ambientUrl) ? m2.ambientUrl : null,
+        effects: effectsFromNames(Array.isArray(m2.effects) ? m2.effects.slice(0, 5) : []),
         inRotation: false,
         extra: true
       });
@@ -22000,6 +22012,13 @@ var EvioSim = (() => {
       const url = ent && ent.attributes && ent.attributes.uri && ent.attributes.uri.url;
       return url ? CMS_BASE + url : null;
     };
+    const termNames = (rel) => {
+      const list2 = rel && rel.data ? Array.isArray(rel.data) ? rel.data : [rel.data] : [];
+      return list2.map((d2) => {
+        const ent = d2 && byId.get(d2.id);
+        return ent && ent.attributes && ent.attributes.name;
+      });
+    };
     const out = [];
     for (const node of raw.data || []) {
       const a2 = node.attributes || {};
@@ -22015,6 +22034,8 @@ var EvioSim = (() => {
         // The map's background sound (ambient_tracks/*.ogg), which official sends as
         // roomParams.ambientURL (opcode 25). 23 of the 51 catalogue maps have one.
         ambientUrl: fileUrl(r2.field_ambient_track),
+        // The map's weather (opcodes 20-24). 32 of the 51 catalogue maps have at least one.
+        effects: effectsFromNames(termNames(r2.field_environment_effect)),
         inRotation: a2.field_in_public_rotation !== false
       });
     }
@@ -28191,7 +28212,7 @@ var EvioSim = (() => {
   };
   var DELTA_VEC3_OPS = /* @__PURE__ */ new Set([136, 137, 176, 178, 179, 180, 211]);
   var DELTA_VEC3_N = { 0: 3, 1: 2, 2: 2, 3: 1, 4: 2, 5: 1, 6: 1 };
-  var DELTA_HEADER_SET = /* @__PURE__ */ new Set([8, 15, 18, 19, 25, 26, 27, 37, 42]);
+  var DELTA_HEADER_SET = /* @__PURE__ */ new Set([8, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 37, 42]);
   var DELTA_TRAILER_SET = /* @__PURE__ */ new Set([280, 298, 306, 308]);
   function _splitPlayerBlock(block) {
     if (!Array.isArray(block) || block[0] !== 244 || block.length < 2) return null;
@@ -28813,6 +28834,14 @@ var EvioSim = (() => {
       header.set(18, currentMapThumb());
       header.set(19, currentMapName());
     }
+    {
+      const fx = currentMapEffects();
+      header.set(20, fx.lightning);
+      header.set(21, fx.rain);
+      header.set(22, fx.snow);
+      header.set(23, fx.dust);
+      header.set(24, fx.wind);
+    }
     header.set(25, currentMapAmbient());
     header.set(37, true);
     header.set(42, Math.max(1, Math.round(1e3 / TICK_MS)));
@@ -29237,6 +29266,29 @@ var EvioSim = (() => {
     } catch {
     }
     return "https://ev.io/sites/default/files/map_thumbs/BishopThumb.png";
+  }
+  var NO_EFFECTS = Object.freeze({ lightning: false, rain: false, snow: false, dust: false, wind: false });
+  var _effectsMemo = { url: null, value: NO_EFFECTS };
+  function currentMapEffects() {
+    const url = currentMapUrl();
+    if (_effectsMemo.url === url) return _effectsMemo.value;
+    let value = NO_EFFECTS;
+    try {
+      const m2 = findMap(url);
+      if (m2 && m2.effects && typeof m2.effects === "object") {
+        value = Object.freeze({
+          lightning: !!m2.effects.lightning,
+          rain: !!m2.effects.rain,
+          snow: !!m2.effects.snow,
+          dust: !!m2.effects.dust,
+          wind: !!m2.effects.wind
+        });
+      }
+    } catch {
+    }
+    _effectsMemo.url = url;
+    _effectsMemo.value = value;
+    return value;
   }
   var _ambientMemo = { url: null, value: "" };
   function currentMapAmbient() {

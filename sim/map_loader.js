@@ -42,6 +42,22 @@ const IMAGE_URL_RE = /^https:\/\/ev\.io\/sites\/default\/files\/[A-Za-z0-9._%\/-
 let _extra = [];
 let _merged = null;
 
+// A map's "Environment Effect" (taxonomy terms Rain / Snow / Dust / Lightning on the CMS map node)
+// as the five roomParams flags official sends (opcodes 20-24). The client draws the weather and plays
+// its sounds from these: rain loop, lightning strikes + thunder, drifting dust, snow. "Wind" has no
+// term in the catalogue today but is a real flag, so a name of that form is honoured too.
+const EFFECT_FLAGS = ['lightning', 'rain', 'snow', 'dust', 'wind'];
+function effectsFromNames(names) {
+  const out = { lightning: false, rain: false, snow: false, dust: false, wind: false };
+  for (const n of names || []) {
+    const k = String(n || '').trim().toLowerCase();
+    if (EFFECT_FLAGS.includes(k)) out[k] = true;
+  }
+  return out;
+}
+// Only a sound from ev.io's own ambient-track folder is accepted from a hosted list.
+const AMBIENT_URL_RE = /^https:\/\/ev\.io\/sites\/default\/files\/ambient_tracks\/[\w.%-]+\.(ogg|mp3)$/i;
+
 function parseExtraList(raw) {
   if (!raw || typeof raw !== 'object' || !Array.isArray(raw.maps)) throw new Error('not an extra-maps list');
   const out = [];
@@ -59,6 +75,8 @@ function parseExtraList(raw) {
       evmapUrl: m.evmapUrl,
       thumbUrl: img(m.thumbUrl),
       largeImageUrl: img(m.largeImageUrl),
+      ambientUrl: typeof m.ambientUrl === 'string' && AMBIENT_URL_RE.test(m.ambientUrl) ? m.ambientUrl : null,
+      effects: effectsFromNames(Array.isArray(m.effects) ? m.effects.slice(0, 5) : []),
       inRotation: false,
       extra: true,
     });
@@ -128,6 +146,10 @@ function baseCatalogue() {
     return url ? CMS_BASE + url : null;
   };
 
+  const termNames = (rel) => {
+    const list = rel && rel.data ? (Array.isArray(rel.data) ? rel.data : [rel.data]) : [];
+    return list.map((d) => { const ent = d && byId.get(d.id); return ent && ent.attributes && ent.attributes.name; });
+  };
   const out = [];
   for (const node of raw.data || []) {
     const a = node.attributes || {};
@@ -143,6 +165,8 @@ function baseCatalogue() {
       // The map's background sound (ambient_tracks/*.ogg), which official sends as
       // roomParams.ambientURL (opcode 25). 23 of the 51 catalogue maps have one.
       ambientUrl: fileUrl(r.field_ambient_track),
+      // The map's weather (opcodes 20-24). 32 of the 51 catalogue maps have at least one.
+      effects: effectsFromNames(termNames(r.field_environment_effect)),
       inRotation: a.field_in_public_rotation !== false,
     });
   }

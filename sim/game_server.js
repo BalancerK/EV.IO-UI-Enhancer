@@ -7635,7 +7635,7 @@ const DELTA_COUNTER_DIR = { 145: 1, 146: 1, 147: 1, 148: 1, 149: 1, 150: 1, 174:
 const DELTA_VEC3_OPS = new Set([136, 137, 176, 178, 179, 180, 211]);
 const DELTA_VEC3_N = { 0: 3, 1: 2, 2: 2, 3: 1, 4: 2, 5: 1, 6: 1 };
 // Header / trailer fields that are "set" (1, 4 = tick and 7 = round timer count on by themselves).
-const DELTA_HEADER_SET = new Set([8, 15, 18, 19, 25, 26, 27, 37, 42]);
+const DELTA_HEADER_SET = new Set([8, 15, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 37, 42]);
 const DELTA_TRAILER_SET = new Set([280, 298, 306, 308]);
 
 // Split one player block into fields: [{ key, sig, tokens, filterable }]. null = do not filter it.
@@ -8316,6 +8316,13 @@ function buildTickBody(playerId, tick, playerState = createPlayerSimState(), pee
   // match (bundle :57117) and stops it when the URL changes or goes empty; official sends it for
   // every map that has one. We never did, so no map ever had its ambience. Always a string: the
   // client calls .includes() on it.
+  // 20-24 roomParams.lightning / rain / snow / dust / wind = the map's "Environment Effect". The client
+  // draws the weather and plays its sounds from these; we never sent them, so no map had weather.
+  {
+    const fx = currentMapEffects();
+    header.set(20, fx.lightning); header.set(21, fx.rain); header.set(22, fx.snow);
+    header.set(23, fx.dust); header.set(24, fx.wind);
+  }
   header.set(25, currentMapAmbient());
   header.set(37, true);
   // 42 Qdh8um3 = matchDuration = TICKS PER SECOND (20). The client already defaults it to 20 and
@@ -8951,6 +8958,25 @@ function currentMapThumb() {
 // Opcode 25 — the current map's ambient track from the catalogue, or "" for none (uploaded custom
 // maps and test maps have none). Remembered per map URL: findMap lists the custom-maps folder on
 // every call, and this runs every tick.
+// Opcodes 20-24 — the current map's weather from the catalogue (all off for uploaded and test maps).
+const NO_EFFECTS = Object.freeze({ lightning: false, rain: false, snow: false, dust: false, wind: false });
+const _effectsMemo = { url: null, value: NO_EFFECTS };
+function currentMapEffects() {
+  const url = currentMapUrl();
+  if (_effectsMemo.url === url) return _effectsMemo.value;
+  let value = NO_EFFECTS;
+  try {
+    const m = mapLoader.findMap(url);
+    if (m && m.effects && typeof m.effects === "object") {
+      value = Object.freeze({ lightning: !!m.effects.lightning, rain: !!m.effects.rain, snow: !!m.effects.snow,
+        dust: !!m.effects.dust, wind: !!m.effects.wind });
+    }
+  } catch { /* catalogue unavailable */ }
+  _effectsMemo.url = url;
+  _effectsMemo.value = value;
+  return value;
+}
+
 const _ambientMemo = { url: null, value: "" };
 function currentMapAmbient() {
   const url = currentMapUrl();
