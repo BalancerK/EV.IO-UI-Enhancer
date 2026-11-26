@@ -404,7 +404,11 @@
     // request, well after the page has loaded), so an update is picked up on the next visit and a
     // slow ev.io never holds up a join. Accounts, logins, the matchmaker and everything else are
     // never cached. Turn it off with localStorage evioAssetCache = '0' (the Lobbies panel's toggle).
-    const ASSET_CACHE_NAME = 'evio-ext-assets-v1';
+    // v2: v1 could hold a file cut off mid-download (ev.io's server dropping the connection still
+    // ends the request as a 200), which the game then failed on every visit — "sfx load error null
+    // Decoding audio data failed." v1 is deleted below, and assetBodyOk() now checks every file.
+    const ASSET_CACHE_NAME = 'evio-ext-assets-v2';
+    const OLD_ASSET_CACHES = ['evio-ext-assets-v1'];
     const ASSET_CACHE_MAX_BYTES = 800 * 1024 * 1024;
     const ASSET_REVALIDATE_MS = 6 * 3600 * 1000;
     const ASSET_REVALIDATE_JSON_MS = 30 * 60 * 1000;   // all-skins grows when skins are added
@@ -413,6 +417,20 @@
     const openAssetCache = () => ((typeof caches !== 'undefined' && window.isSecureContext)
         ? caches.open(ASSET_CACHE_NAME).catch(() => null) : Promise.resolve(null));
     let assetCacheP = openAssetCache();
+    try { if (typeof caches !== 'undefined' && window.isSecureContext) for (const n of OLD_ASSET_CACHES) caches.delete(n).catch(() => {}); } catch (e) { /* ignore */ }
+    // Is this download fit to keep? It must be the whole file (Content-Length, when the body was not
+    // compressed in transit), not an error page (no game file is HTML), and a sound must be a sound.
+    function assetBodyOk(key, size, getHeader) {
+        if (!size) return false;
+        const type = String(getHeader('content-type') || '').toLowerCase();
+        if (type.indexOf('text/html') !== -1) return false;
+        const enc = String(getHeader('content-encoding') || '').toLowerCase();
+        const len = Number(getHeader('content-length'));
+        if ((!enc || enc === 'identity') && Number.isFinite(len) && len > 0 && len !== size) return false;
+        if (/\.(mp3|ogg|wav|m4a)$/i.test(key.split('?')[0])
+            && !(type.indexOf('audio/') === 0 || type.indexOf('application/octet-stream') === 0 || type.indexOf('video/ogg') === 0)) return false;
+        return true;
+    }
     const assetStats = { hits: 0, misses: 0 };
 
     // The cache key for a URL the game is about to load, or null if it must not be cached.
@@ -450,7 +468,7 @@
         const r = await _nativeFetch(url, { credentials: 'same-origin' });
         if (r.status === 200 && r.type === 'basic') {
             const c = r.clone();
-            c.blob().then((b) => assetPut(key, b, c.headers)).catch(() => {});
+            c.blob().then((b) => { if (assetBodyOk(key, b.size, (n) => c.headers.get(n))) return assetPut(key, b, c.headers); }).catch(() => {});
         }
         return r;
     }
@@ -470,7 +488,10 @@
         setTimeout(() => {
             _nativeFetch(key, { headers, cache: 'no-store', credentials: 'same-origin' }).then(async (r) => {
                 if (r.status === 304) await assetPut(key, await cached.blob(), cached.headers);
-                else if (r.status === 200 && r.type === 'basic') await assetPut(key, await r.blob(), r.headers);
+                else if (r.status === 200 && r.type === 'basic') {
+                    const b = await r.blob();
+                    if (assetBodyOk(key, b.size, (n) => r.headers.get(n))) await assetPut(key, b, r.headers);
+                }
             }).catch(() => {});
         }, 15000 + Math.random() * 15000);
     }
@@ -683,6 +704,7 @@
                                 : rt === 'blob' ? this.response
                                 : (rt === '' || rt === 'text') ? new Blob([this.responseText]) : null;
                             if (!body) return;
+                            if (!assetBodyOk(asset.key, body.size, (n) => { try { return this.getResponseHeader(n); } catch (e) { return null; } })) return;
                             const h = new Headers();
                             for (const n of ['content-type', 'etag', 'last-modified']) {
                                 const v = this.getResponseHeader(n);
