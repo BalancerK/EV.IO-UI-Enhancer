@@ -54,27 +54,38 @@ function fromWire(data) {
 // jitter lets the channel's internal send buffer grow faster than it drains; since nothing ever
 // throttles on it, the backlog only grows, and every later send sits further back in an
 // ever-larger queue — this IS the root cause behind "the lobby gets laggier the longer it runs,
-// and never recovers on its own" reported live after ~15 minutes of real P2P play. Fixed here,
-// at the one place in OUR OWN code that calls network.send() for the high-frequency per-tick
-// state (game ticks/inputs), rather than patching the vendored library's minified internals: skip
-// the send outright once the channel's own backlog crosses a threshold, exactly the same
-// "drop the stale one, the next tick's data supersedes it anyway" philosophy game_server.js
-// already applies to oversized input queues (see INPUT_QUEUE_MAX_TICKS there) — a dropped
-// real-time tick update is far better than one more message piled onto a backlog that can never
-// catch up at this send rate.
+// and never recovers on its own" reported live after ~15 minutes of real P2P play.
+//
+// IMPORTANT, found the hard way: this must ONLY drop on the HOST's own OUTGOING 'unreliable'
+// channel (background.js's channel split: binary -> 'unreliable', string -> 'reliable' — see
+// its own comment). That channel carries per-tick game STATE broadcast from host to peer, where
+// dropping is genuinely safe ("the next tick's data supersedes it anyway", the same philosophy
+// game_server.js's own INPUT_QUEUE_MAX_TICKS already applies). It must NEVER be applied to a
+// joining peer's own OUTGOING data (join:send — their movement/fire input, which is NOT safely
+// "superseded" the same way; a dropped single-click semi-auto fire edge is a shot that never
+// happened at all) or to the 'reliable' channel in EITHER direction (the exact "#SHOT#" aim ray,
+// chat, ping/pong, handshake control — none of these have a "next one" to fall back on, and
+// 'reliable' means reliable: WebRTC's own retransmission is what's supposed to handle congestion
+// there, not us discarding the message ourselves before it ever gets that chance).
+//
+// Reported live: a high-ping (200-300ms) player joining through the extension saw ~25% of their
+// own shots simply not register — root-caused to this exact drop firing on THEIR outgoing input/
+// shot-ray traffic (join:send), not the host's broadcast it was actually designed for.
 const BUFFERED_AMOUNT_DROP_THRESHOLD = 256 * 1024; // ~1s+ of backlog at typical tick-packet sizes
 const _lastBackpressureWarnAt = new Map(); // peerId -> timestamp, so a sustained drop run logs once/5s, not every tick
 function backpressureSend(network, peerId, channel, data) {
-    const peer = network.peers.get(peerId);
-    const ch = peer && peer.channels && peer.channels[channel];
-    if (ch && typeof ch.bufferedAmount === 'number' && ch.bufferedAmount > BUFFERED_AMOUNT_DROP_THRESHOLD) {
-        const now = Date.now();
-        const last = _lastBackpressureWarnAt.get(peerId) || 0;
-        if (now - last > 5000) {
-            _lastBackpressureWarnAt.set(peerId, now);
-            console.warn(`[evio-offscreen] dropping send to ${peerId} on channel "${channel}" — bufferedAmount ${ch.bufferedAmount} over threshold, data channel can't keep up`);
+    if (channel === 'unreliable') {
+        const peer = network.peers.get(peerId);
+        const ch = peer && peer.channels && peer.channels[channel];
+        if (ch && typeof ch.bufferedAmount === 'number' && ch.bufferedAmount > BUFFERED_AMOUNT_DROP_THRESHOLD) {
+            const now = Date.now();
+            const last = _lastBackpressureWarnAt.get(peerId) || 0;
+            if (now - last > 5000) {
+                _lastBackpressureWarnAt.set(peerId, now);
+                console.warn(`[evio-offscreen] dropping send to ${peerId} on channel "${channel}" — bufferedAmount ${ch.bufferedAmount} over threshold, data channel can't keep up`);
+            }
+            return;
         }
-        return;
     }
     network.send(channel, peerId, data);
 }
@@ -193,7 +204,9 @@ port.onMessage.addListener((msg) => {
     if (msg.type === 'join:send') {
         const entry = joinNetworks.get(msg.requestId);
         if (!entry) return;
-        try { backpressureSend(entry.network, entry.serverPeerId, msg.channel, fromWire(msg.data)); } catch (e) { /* ignore */ }
+        // Deliberately NOT backpressureSend — see its own comment. This is a joining peer's own
+        // outgoing input/shot data, which is never safe for us to silently drop.
+        try { entry.network.send(msg.channel, entry.serverPeerId, fromWire(msg.data)); } catch (e) { /* ignore */ }
         return;
     }
     if (msg.type === 'join:leave') {
