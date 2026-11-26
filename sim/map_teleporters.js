@@ -113,4 +113,37 @@ function applyMapTeleporters(ps, teleporters, tick, usedTicks) {
   return true;
 }
 
-export { applyMapTeleporters, teleporterAt, hashUnit };
+/**
+ * Projectiles go through portals too (ProjectileState.tick, 1-7-1 bundle :54495-54510). Rockets,
+ * grenade-launcher shells and thrown grenades are moved to the exit with their velocity re-based,
+ * exactly like a player. The trigger differs from the player one: the projectile's own position (no
+ * +1 lift), the authored radius with NO +1, and it fires only on the step that CROSSES INTO the
+ * radius (previous position outside, new position inside). The first matching teleporter wins.
+ *
+ * Projectiles are server-streamed (the client cannot simulate them), so without this they flew
+ * straight through every portal on our servers.
+ *
+ * @param prev  position before this step's move   @param pos / vel  mutated in place
+ * @returns true if the projectile was teleported
+ */
+function applyProjectileTeleporters(prev, pos, vel, teleporters, tick, usedTicks) {
+  if (!teleporters || !pos || !prev) return false;
+  for (const key in teleporters) {
+    const t = teleporters[key];
+    if (!t.Qcnqzx4 || t.Qcnqzx4.length === 0) continue;
+    const r = t.Quwa9s1, c = t.Qdsukt4;
+    const inNow = Math.hypot(pos.x - c.x, pos.y - c.y, pos.z - c.z) <= r;
+    const inBefore = Math.hypot(prev.x - c.x, prev.y - c.y, prev.z - c.z) <= r;
+    if (!inNow || inBefore) continue;
+    const destId = t.Qcnqzx4[Math.floor(hashUnit(String(pos.x)) * t.Qcnqzx4.length)];
+    const to = teleporters[destId];
+    if (!to) continue;   // the client's `A in u` guard: try the next teleporter
+    if (vel) rotateY(vel, to.Qrmqlp - t.Qrmqlp + Math.PI);
+    pos.x = to.Qdsukt4.x; pos.y = to.Qdsukt4.y; pos.z = to.Qdsukt4.z;
+    if (usedTicks) usedTicks[parseInt(key, 10)] = usedTicks[destId] = tick;
+    return true;
+  }
+  return false;
+}
+
+export { applyMapTeleporters, applyProjectileTeleporters, teleporterAt, hashUnit };

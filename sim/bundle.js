@@ -21367,6 +21367,27 @@ var EvioSim = (() => {
     if (usedTicks) usedTicks[idx] = usedTicks[destId] = tick;
     return true;
   }
+  function applyProjectileTeleporters(prev, pos, vel, teleporters, tick, usedTicks) {
+    if (!teleporters || !pos || !prev) return false;
+    for (const key in teleporters) {
+      const t2 = teleporters[key];
+      if (!t2.Qcnqzx4 || t2.Qcnqzx4.length === 0) continue;
+      const r2 = t2.Quwa9s1, c2 = t2.Qdsukt4;
+      const inNow = Math.hypot(pos.x - c2.x, pos.y - c2.y, pos.z - c2.z) <= r2;
+      const inBefore = Math.hypot(prev.x - c2.x, prev.y - c2.y, prev.z - c2.z) <= r2;
+      if (!inNow || inBefore) continue;
+      const destId = t2.Qcnqzx4[Math.floor(hashUnit(String(pos.x)) * t2.Qcnqzx4.length)];
+      const to2 = teleporters[destId];
+      if (!to2) continue;
+      if (vel) rotateY(vel, to2.Qrmqlp - t2.Qrmqlp + Math.PI);
+      pos.x = to2.Qdsukt4.x;
+      pos.y = to2.Qdsukt4.y;
+      pos.z = to2.Qdsukt4.z;
+      if (usedTicks) usedTicks[parseInt(key, 10)] = usedTicks[destId] = tick;
+      return true;
+    }
+    return false;
+  }
 
   // sim/navmesh_pathfinder.js
   var TELEPORT_SNAP_DIST = 12;
@@ -23658,6 +23679,12 @@ var EvioSim = (() => {
     const c2 = WEAPON_PELLET_COUNT[nid];
     return Number.isFinite(c2) && c2 > 1 ? Math.round(c2) : 1;
   }
+  var WEAPON_BURST_QUANTITY = _weaponDataMap("burstQuantity");
+  var WEAPON_BURST_COOLDOWN = _weaponDataMap("burstCooldown");
+  function weaponBurst(nid) {
+    const q2 = WEAPON_BURST_QUANTITY[nid], c2 = WEAPON_BURST_COOLDOWN[nid];
+    return Number.isFinite(q2) && Number.isFinite(c2) ? { quantity: q2, cooldown: c2, window: q2 * c2 } : null;
+  }
   var PICKUP_WEAPON_IDS = [6, 7, 8, 281, 282, 283];
   var WEAPON_PICKUP_SIZE = _weaponDataMap("pickUpSize");
   var PICKUP_ENABLED = define({
@@ -25010,6 +25037,14 @@ var EvioSim = (() => {
           removedEntityKeys.push(key);
           return;
         }
+        applyProjectileTeleporters(
+          { x: g2.pos.x - dx, y: g2.pos.y - dy, z: g2.pos.z - dz },
+          g2.pos,
+          g2.vel,
+          physics_world_default.teleporters,
+          _live.globalTick || 0,
+          match.teleporterUseTicks
+        );
       }
       if (detonate) {
         let nx = ray ? ray.nx : 0, ny = ray ? ray.ny : 1, nz = ray ? ray.nz : 0;
@@ -26130,52 +26165,98 @@ var EvioSim = (() => {
     const { eye, dir } = shotRay(shooter, clientRay);
     spawnFiredProjectile(shooter, shooter.equippedWeaponId, eye, dir);
   }
-  function _coneOffsetToWorld(fwd, lx, ly) {
-    const l2 = Math.hypot(lx, ly, 1) || 1;
-    const nx = lx / l2, ny = ly / l2, nz = 1 / l2;
-    let rx = -fwd.z, ry = 0, rz = fwd.x;
-    let rl2 = Math.hypot(rx, ry, rz);
-    if (rl2 < 1e-6) {
-      rx = 1;
-      ry = 0;
-      rz = 0;
-      rl2 = 1;
-    }
-    rx /= rl2;
-    ry /= rl2;
-    rz /= rl2;
-    const ux = fwd.y * rz - fwd.z * ry, uy = fwd.z * rx - fwd.x * rz, uz = fwd.x * ry - fwd.y * rx;
-    const wx = rx * nx + ux * ny + fwd.x * nz, wy = ry * nx + uy * ny + fwd.y * nz, wz = rz * nx + uz * ny + fwd.z * nz;
-    const wl2 = Math.hypot(wx, wy, wz) || 1;
-    return { x: wx / wl2, y: wy / wl2, z: wz / wl2 };
+  function _rotateByYawPitch(x2, y2, z2, yaw, pitch) {
+    const cp2 = Math.cos(pitch), sp2 = Math.sin(pitch);
+    const y1 = y2 * cp2 - z2 * sp2, z1 = y2 * sp2 + z2 * cp2;
+    const cy = Math.cos(yaw), sy = Math.sin(yaw);
+    return { x: x2 * cy + z1 * sy, y: y1, z: -x2 * sy + z1 * cy };
   }
-  function pelletDirections(nid, fwd, count, zooming) {
+  function _yawPitchOf(fwd) {
+    const l2 = Math.hypot(fwd.x, fwd.y, fwd.z) || 1;
+    return { yaw: Math.atan2(-fwd.x, -fwd.z), pitch: Math.asin(Math.max(-1, Math.min(1, fwd.y / l2))) };
+  }
+  function _pelletOffsets(nid, count, zooming) {
     const spreadDef = WEAPON_SPRAY_SPREAD[nid];
     const spreadADS = WEAPON_SPRAY_SPREAD_ADS[nid];
     const spread = zooming && Number.isFinite(spreadADS) ? spreadADS : Number.isFinite(spreadDef) ? spreadDef : 0.1;
-    const p2 = Math.ceil(count / 2);
-    const dirs = [];
+    const h2 = Math.ceil(count / 2);
+    const out = [];
     for (const scale of [0.5, 1]) {
-      for (let f2 = 0; f2 < p2 && dirs.length < count; f2++) {
-        const m2 = f2 / p2 * Math.PI * 2;
-        const lx = Math.cos(m2) * spread * scale, ly = Math.sin(m2) * spread * scale;
-        dirs.push(_coneOffsetToWorld(fwd, lx, ly));
+      for (let f2 = 0; f2 < h2; f2++) {
+        const m2 = f2 / h2 * Math.PI * 2;
+        out.push({ lx: Math.cos(m2) * spread * scale, ly: Math.sin(m2) * spread * scale });
       }
     }
-    return dirs;
+    return out;
+  }
+  function _pelletDir(off, yaw, pitch) {
+    const l2 = Math.hypot(off.lx, off.ly, 1);
+    return _rotateByYawPitch(off.lx / l2, off.ly / l2, -1 / l2, yaw, pitch);
+  }
+  function pelletDirections(nid, fwd, count, zooming) {
+    const { yaw, pitch } = _yawPitchOf(fwd);
+    return _pelletOffsets(nid, count, zooming).map((off) => _pelletDir(off, yaw, pitch));
+  }
+  function _parsePelletSid(sid) {
+    if (typeof sid !== "string") return null;
+    const cut = sid.indexOf(":");
+    if (cut <= 0) return null;
+    const index = Number(sid.slice(0, cut));
+    if (!Number.isInteger(index) || index < 0) return null;
+    return { index, suffix: sid.slice(cut + 1) };
+  }
+  function shotgunAimFromClientRay(shooter, clientRay, nid, count, zooming) {
+    const offs = _pelletOffsets(nid, count, zooming);
+    const d2 = { x: clientRay.dx, y: clientRay.dy, z: clientRay.dz };
+    const parsed = _parsePelletSid(clientRay.sid);
+    const h2 = offs.length / 2;
+    if (parsed && h2 >= 2) {
+      const byIdx = /* @__PURE__ */ new Map([[parsed.index, d2]]);
+      for (const r2 of Array.isArray(shooter._clientRays) ? shooter._clientRays : []) {
+        const q2 = _parsePelletSid(r2.sid);
+        if (q2 && q2.suffix === parsed.suffix && q2.index < offs.length && !byIdx.has(q2.index)) {
+          byIdx.set(q2.index, { x: r2.dx, y: r2.dy, z: r2.dz });
+        }
+      }
+      if (byIdx.size === offs.length) {
+        let sx = 0, sy = 0, sz = 0;
+        for (const v2 of byIdx.values()) {
+          const l2 = Math.hypot(v2.x, v2.y, v2.z) || 1;
+          sx += v2.x / l2;
+          sy += v2.y / l2;
+          sz += v2.z / l2;
+        }
+        if (Math.hypot(sx, sy, sz) > 1e-6) return _yawPitchOf({ x: sx, y: sy, z: sz });
+      }
+    }
+    const off = offs[parsed && parsed.index < offs.length ? parsed.index : 0];
+    const L2 = Math.hypot(off.lx, off.ly, 1);
+    const nx = off.lx / L2, ny = off.ly / L2, nz = -1 / L2;
+    const dl2 = Math.hypot(d2.x, d2.y, d2.z) || 1;
+    const wx = d2.x / dl2, wy = d2.y / dl2, wz = d2.z / dl2;
+    const R2 = Math.hypot(ny, nz);
+    const pitch = Math.asin(Math.max(-1, Math.min(1, wy / R2))) - Math.atan2(ny, -nz);
+    const mx = nx, mz = ny * Math.sin(pitch) + nz * Math.cos(pitch);
+    const yaw = Math.atan2(wx, wz) - Math.atan2(mx, mz);
+    return { yaw, pitch };
   }
   function fireShotgunPellets(shooter, sessions, clientRay) {
     const ps2 = shooter._ps;
     if (!ps2 || !ps2.Qdsukt4 || !physics_world_default.world) return;
-    const { eye, dir: fwd } = shotRay(shooter, clientRay);
+    const { eye, dir: rayDir } = shotRay(shooter, clientRay);
     const nid = shooter.equippedWeaponId;
     const count = weaponPelletCount(nid);
     const zooming = !!ps2.Qgk2mcg;
     const bd2 = WEAPON_DMG[nid];
-    for (const dir of pelletDirections(nid, fwd, count, zooming)) {
+    const aim = clientRay ? shotgunAimFromClientRay(shooter, clientRay, nid, count, zooming) : _yawPitchOf(rayDir);
+    const fwd = _rotateByYawPitch(0, 0, -1, aim.yaw, aim.pitch);
+    const parsed = clientRay ? _parsePelletSid(clientRay.sid) : null;
+    const offs = _pelletOffsets(nid, count, zooming);
+    for (let i2 = 0; i2 < offs.length; i2++) {
+      const dir = _pelletDir(offs[i2], aim.yaw, aim.pitch);
       const hit = withLagComp(shooter, sessions, () => physics_extracted_default.hitscanPlayers(physics_world_default.world, eye.x, eye.y, eye.z, dir.x, dir.y, dir.z, ps2.Q7q6byi));
       spawnBullet(shooter._ownerSid, eye, dir, bd2 > 0 ? bd2 * DMG_GLOBAL_MULT * LOBBY_DAMAGE_MULT : 0, nid);
-      applyHit(shooter, sessions, hit, eye, clientRay && clientRay.sid);
+      applyHit(shooter, sessions, hit, eye, parsed ? `${i2}:${parsed.suffix}` : clientRay && clientRay.sid);
     }
     destroyMineInLineOfFire(eye, fwd, sessions);
   }
@@ -26288,8 +26369,12 @@ var EvioSim = (() => {
       p2.reloadTicks = weaponReloadTicks(p2.equippedWeaponId, p2);
     }
     const _cdTicks = weaponCooldownTicks(p2.equippedWeaponId);
-    const _fireReady = SERVER_RECOIL && ps2 && Number.isFinite(ps2.Qezh4wz) ? ps2.Qezh4wz + 1 >= _cdTicks : p2.fireCooldown <= 0;
-    if (held.has(5) && _fireReady && !(p2.switchTimer > 0)) {
+    const _atcGate = SERVER_RECOIL && ps2 && Number.isFinite(ps2.Qezh4wz);
+    const _burst = _atcGate ? weaponBurst(p2.equippedWeaponId) : null;
+    const _burstShot = !!(_burst && Number.isFinite(ps2.Qwx5aeh) && ps2.Qezh4wz + 1 >= _burst.cooldown && ps2.Qwx5aeh + 1 < _burst.window);
+    const _fireReady = _atcGate ? ps2.Qezh4wz + 1 >= _cdTicks || _burstShot : p2.fireCooldown <= 0;
+    const _fireHeld = held.has(5) || held.has(18);
+    if (_fireHeld && _fireReady && !(p2.switchTimer > 0)) {
       if (isGun && (p2.reloadTicks > 0 || p2.gunAmmo <= 0)) return;
       p2.fireCooldown = _cdTicks;
       p2._firingThisTick = true;
@@ -27506,6 +27591,10 @@ var EvioSim = (() => {
     if (Number.isFinite(ps2.Qalaptp)) ps2.Qalaptp--;
     if (Number.isFinite(ps2.Q5vx943)) ps2.Q5vx943--;
     if (Number.isFinite(ps2.Qwx5aeh)) ps2.Qwx5aeh++;
+    if (playerState._firingThisTick && Number.isFinite(ps2.Qwx5aeh)) {
+      const burst = weaponBurst(playerState.equippedWeaponId);
+      if (burst && ps2.Qwx5aeh > burst.window) ps2.Qwx5aeh = 0;
+    }
     if (Number.isFinite(ps2.Qezdgca)) ps2.Qezdgca++;
     if (Number.isFinite(ps2.Qd2e7ku)) ps2.Qd2e7ku++;
     if (Number.isFinite(ps2.Qett9p1)) ps2.Qett9p1++;

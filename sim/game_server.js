@@ -1632,6 +1632,18 @@ function weaponPelletCount(nid) {
   const c = WEAPON_PELLET_COUNT[nid];
   return Number.isFinite(c) && c > 1 ? Math.round(c) : 1;
 }
+// Burst fire (Burst Rifle: burstQuantity 3, burstCooldown 2, cooldown 8). The client's canPlayerFire
+// (1-7-1 bundle :54596) lets a shot through BEFORE the normal cooldown while
+//   ticksSinceLastShot + 1 >= burstCooldown  &&  ticksSinceLastBurst + 1 < burstCooldown * burstQuantity
+// and applyFiredWeaponStateChange (:54611) restarts the burst window on a shot fired once more than
+// burstCooldown * burstQuantity ticks have passed since the last burst started. Held fire therefore
+// goes 0, 2, 4, then 12, 14, 16: three shots per 12 ticks. Returns null for a non-burst weapon.
+const WEAPON_BURST_QUANTITY = _weaponDataMap("burstQuantity");
+const WEAPON_BURST_COOLDOWN = _weaponDataMap("burstCooldown");
+function weaponBurst(nid) {
+  const q = WEAPON_BURST_QUANTITY[nid], c = WEAPON_BURST_COOLDOWN[nid];
+  return (Number.isFinite(q) && Number.isFinite(c)) ? { quantity: q, cooldown: c, window: q * c } : null;
+}
 
 // ── Weapon pickups — map spawn points that grant a special weapon on proximity ──────────────────
 // Official maps carry fixed pickup LOCATIONS (evmap flags&32, see physics_world.js's
@@ -3411,6 +3423,12 @@ function stepEntity(key, g, dt, sessions) {
       // already covers walls and floors. The only remaining guard is the kill plane, which is a
       // real game rule rather than a geometry guess.
       if (g.pos.y < FALL_KILL_Y) { activeEntities.delete(key); removedEntityKeys.push(key); return; }
+      // Map portals (see map_teleporters.applyProjectileTeleporters). Only on a free-flight step: on a
+      // step that also hit geometry, the client would resolve that wall contact at the EXIT, which
+      // makes no physical sense for a bounce, so the contact wins there instead.
+      teleport.applyProjectileTeleporters(
+        { x: g.pos.x - dx, y: g.pos.y - dy, z: g.pos.z - dz }, g.pos, g.vel,
+        bpw.teleporters, _live.globalTick || 0, match.teleporterUseTicks);
     }
     if (detonate) {
       // Surface normal at the contact: from the raycast, or straight up for the terrain-floor fallback.
@@ -4665,55 +4683,110 @@ function fireProjectileShot(shooter, sessions, clientRay) {
   spawnFiredProjectile(shooter, shooter.equippedWeaponId, eye, dir);
 }
 
-// Rotate a small LOCAL cone offset (lx, ly, forward=-1, already normalized) into world space around
-// a known forward direction `fwd` — the shotgun pellet-spread equivalent of phys.aimDirection.
-// `fwd` plays the role of the camera's own forward axis; right/up are derived from it exactly like
-// any look-basis construction (world-up as the stabilizing reference, degenerate only when fwd is
-// itself near-vertical, negligible for a roughly-forward-facing shot).
-// lx/ly are the RAW (not pre-normalized) local cone offsets — this function builds the full local
-// vector (lx, ly, -1) (forward = local -Z, matching the real client's own `new Vector3(lx, ly,
-// -1).normalize()` before rotating it by the camera's yaw/pitch) and normalizes it as one 3D unit
-// vector before rotating, so the forward component gets the same 1/L scaling the lateral ones do.
-// A previous version had the caller pre-divide lx/ly by hypot(lx,ly,1) and used a bare coefficient
-// of 1 for fwd here — correct in the limit lx=ly=0, but at the shotgun's own spread radius (0.1)
-// that under-scaled forward relative to the exact per-component normalization by about 0.03°: real
-// enough to be worth fixing exactly (one caller, zero cost), negligible enough that it was never
-// going to be the difference between a landed and a missed pellet.
-function _coneOffsetToWorld(fwd, lx, ly) {
-  const l = Math.hypot(lx, ly, 1) || 1;
-  const nx = lx / l, ny = ly / l, nz = 1 / l;
-  let rx = -fwd.z, ry = 0, rz = fwd.x;             // cross(worldUp(0,1,0), fwd)
-  let rl = Math.hypot(rx, ry, rz);
-  if (rl < 1e-6) { rx = 1; ry = 0; rz = 0; rl = 1; }   // fwd ~vertical: fall back to world +x as "right"
-  rx /= rl; ry /= rl; rz /= rl;
-  const ux = fwd.y * rz - fwd.z * ry, uy = fwd.z * rx - fwd.x * rz, uz = fwd.x * ry - fwd.y * rx;
-  const wx = rx * nx + ux * ny + fwd.x * nz, wy = ry * nx + uy * ny + fwd.y * nz, wz = rz * nx + uz * ny + fwd.z * nz;
-  const wl = Math.hypot(wx, wy, wz) || 1;
-  return { x: wx / wl, y: wy / wl, z: wz / wl };
+// The client's rotateVectorByYawPitch (1-7-1 bundle :41088): a three.js Euler(pitch, yaw, 0, 'YXZ')
+// applied to v, i.e. Ry(yaw)·Rx(pitch)·v. Camera right stays horizontal; camera up tilts with pitch.
+// An earlier hand-built basis here got "right" correct but "up" pointing DOWN, which mirrored the
+// pellet ring vertically. The ring is symmetric so the set of rays was unchanged, but pellet i went
+// where the client's pellet (h-i) went, so per-pellet hit ids could not line up with the client's.
+function _rotateByYawPitch(x, y, z, yaw, pitch) {
+  const cp = Math.cos(pitch), sp = Math.sin(pitch);
+  const y1 = y * cp - z * sp, z1 = y * sp + z * cp;                 // Rx(pitch)
+  const cy = Math.cos(yaw), sy = Math.sin(yaw);
+  return { x: x * cy + z1 * sy, y: y1, z: -x * sy + z1 * cy };      // Ry(yaw)
+}
+// Inverse of the above for a forward vector: yaw/pitch such that Ry·Rx·(0,0,-1) = fwd.
+function _yawPitchOf(fwd) {
+  const l = Math.hypot(fwd.x, fwd.y, fwd.z) || 1;
+  return { yaw: Math.atan2(-fwd.x, -fwd.z), pitch: Math.asin(Math.max(-1, Math.min(1, fwd.y / l))) };
 }
 
-// Pellet directions for a multi-projectile weapon (Shotgun), reproducing the client's OWN
-// deterministic double-ring formula (bundle :44037-44045) rather than random spread — the client
-// does not randomize shotgun pellets at all (spreadMax/spreadMin, used for single-projectile
-// recoil, are not consulted here): p = ceil(count/2) pellets on an inner ring at HALF the spread
-// radius, then p more on an outer ring at the full radius, evenly spaced by angle around the aim
-// axis. `spread` is sprayPatternSpreadADS while zooming, else sprayPatternSpread (both from the
-// weapon catalogue), falling back to the client's own 0.1 default if neither is defined.
-function pelletDirections(nid, fwd, count, zooming) {
+// The local cone offsets (lx, ly) of every pellet, in the client's own order (bundle :54711): h =
+// ceil(count/2) pellets on an inner ring at HALF the spread radius, then h more on an outer ring at the
+// full radius, evenly spaced by angle. The client emits all 2h even when count is odd, so this does
+// too. `spread` is sprayPatternSpreadADS while zooming, else sprayPatternSpread, else the client's 0.1.
+// The client does not randomise shotgun pellets at all (spreadMax/spreadMin are single-ray recoil).
+function _pelletOffsets(nid, count, zooming) {
   const spreadDef = WEAPON_SPRAY_SPREAD[nid];
   const spreadADS = WEAPON_SPRAY_SPREAD_ADS[nid];
   const spread = (zooming && Number.isFinite(spreadADS)) ? spreadADS
     : (Number.isFinite(spreadDef) ? spreadDef : 0.1);
-  const p = Math.ceil(count / 2);
-  const dirs = [];
+  const h = Math.ceil(count / 2);
+  const out = [];
   for (const scale of [0.5, 1]) {
-    for (let f = 0; f < p && dirs.length < count; f++) {
-      const m = (f / p) * Math.PI * 2;
-      const lx = Math.cos(m) * spread * scale, ly = Math.sin(m) * spread * scale;
-      dirs.push(_coneOffsetToWorld(fwd, lx, ly));
+    for (let f = 0; f < h; f++) {
+      const m = (f / h) * Math.PI * 2;
+      out.push({ lx: Math.cos(m) * spread * scale, ly: Math.sin(m) * spread * scale });
     }
   }
-  return dirs;
+  return out;
+}
+function _pelletDir(off, yaw, pitch) {
+  const l = Math.hypot(off.lx, off.ly, 1);
+  return _rotateByYawPitch(off.lx / l, off.ly / l, -1 / l, yaw, pitch);
+}
+
+// Pellet directions around the aim `fwd`, exactly as the client builds them.
+function pelletDirections(nid, fwd, count, zooming) {
+  const { yaw, pitch } = _yawPitchOf(fwd);
+  return _pelletOffsets(nid, count, zooming).map((off) => _pelletDir(off, yaw, pitch));
+}
+
+// A shot sid is "pelletIndex:shooterId:fireTick". Returns { index, suffix } or null.
+function _parsePelletSid(sid) {
+  if (typeof sid !== "string") return null;
+  const cut = sid.indexOf(":");
+  if (cut <= 0) return null;
+  const index = Number(sid.slice(0, cut));
+  if (!Number.isInteger(index) || index < 0) return null;
+  return { index, suffix: sid.slice(cut + 1) };
+}
+
+// Recover the shooter's real aim from the client's pellet rays.
+//
+// The userscript / extension forward one "#SHOT#" ray PER PELLET, and those rays are the PELLET
+// directions, not the crosshair. The one takeClientRay() hands us is normally pellet 0, which sits
+// half a spread radius to the right of the aim. Building the ring around that ray, as this used to,
+// shifted every shotgun blast ~2.9 deg off the crosshair (1.4 deg aiming down sights).
+//
+// With the whole ring queued (the normal case: all pellets are sent in the same frame, before the
+// tick's input), the mean of the rays IS the aim, since each ring is symmetric about it, and that
+// needs no assumption about the spread. Otherwise the one ray is un-rotated by its own known pellet
+// offset. The pattern itself is always rebuilt here rather than trusting 12 client-chosen rays, so a
+// tampered client cannot collapse the spread onto one target.
+function shotgunAimFromClientRay(shooter, clientRay, nid, count, zooming) {
+  const offs = _pelletOffsets(nid, count, zooming);
+  const d = { x: clientRay.dx, y: clientRay.dy, z: clientRay.dz };
+  const parsed = _parsePelletSid(clientRay.sid);
+  const h = offs.length / 2;
+  if (parsed && h >= 2) {
+    const byIdx = new Map([[parsed.index, d]]);
+    for (const r of (Array.isArray(shooter._clientRays) ? shooter._clientRays : [])) {
+      const q = _parsePelletSid(r.sid);
+      if (q && q.suffix === parsed.suffix && q.index < offs.length && !byIdx.has(q.index)) {
+        byIdx.set(q.index, { x: r.dx, y: r.dy, z: r.dz });
+      }
+    }
+    if (byIdx.size === offs.length) {
+      let sx = 0, sy = 0, sz = 0;
+      for (const v of byIdx.values()) {
+        const l = Math.hypot(v.x, v.y, v.z) || 1;
+        sx += v.x / l; sy += v.y / l; sz += v.z / l;
+      }
+      if (Math.hypot(sx, sy, sz) > 1e-6) return _yawPitchOf({ x: sx, y: sy, z: sz });
+    }
+  }
+  // Single ray: solve Ry(yaw)·Rx(pitch)·n = d for the pellet's own local direction n.
+  const off = offs[parsed && parsed.index < offs.length ? parsed.index : 0];
+  const L = Math.hypot(off.lx, off.ly, 1);
+  const nx = off.lx / L, ny = off.ly / L, nz = -1 / L;
+  const dl = Math.hypot(d.x, d.y, d.z) || 1;
+  const wx = d.x / dl, wy = d.y / dl, wz = d.z / dl;
+  // wy = ny*cos(p) - nz*sin(p) = R*sin(p + phi), with phi = atan2(ny, -nz)
+  const R = Math.hypot(ny, nz);
+  const pitch = Math.asin(Math.max(-1, Math.min(1, wy / R))) - Math.atan2(ny, -nz);
+  const mx = nx, mz = ny * Math.sin(pitch) + nz * Math.cos(pitch);
+  const yaw = Math.atan2(wx, wz) - Math.atan2(mx, mz);
+  return { yaw, pitch };
 }
 
 // SHOTGUN (and any future multi-pellet weapon): N independent hitscan rays from one trigger pull,
@@ -4724,16 +4797,27 @@ function pelletDirections(nid, fwd, count, zooming) {
 function fireShotgunPellets(shooter, sessions, clientRay) {
   const ps = shooter._ps;
   if (!ps || !ps.Qdsukt4 || !bpw.world) return;
-  const { eye, dir: fwd } = shotRay(shooter, clientRay);
+  const { eye, dir: rayDir } = shotRay(shooter, clientRay);
   const nid = shooter.equippedWeaponId;
   const count = weaponPelletCount(nid);
   const zooming = !!ps.Qgk2mcg;
   const bd = WEAPON_DMG[nid];
-  for (const dir of pelletDirections(nid, fwd, count, zooming)) {
+  // shotRay's direction is the crosshair only when it was reconstructed server-side; a client ray is
+  // one PELLET's direction, so recover the real aim from it first (see shotgunAimFromClientRay).
+  const aim = clientRay ? shotgunAimFromClientRay(shooter, clientRay, nid, count, zooming) : _yawPitchOf(rayDir);
+  const fwd = _rotateByYawPitch(0, 0, -1, aim.yaw, aim.pitch);
+  // Each pellet's hit is keyed by ITS OWN client sid "i:shooter:tick", the id the client gave that
+  // bullet. They all used to carry pellet 0's sid, so the hits collided on one playerMap key: one
+  // damage number for the whole blast, and the other pellets' predicted damage was never pruned and
+  // sat on the enemy's bar for ~3 ticks (the double-damage flicker).
+  const parsed = clientRay ? _parsePelletSid(clientRay.sid) : null;
+  const offs = _pelletOffsets(nid, count, zooming);
+  for (let i = 0; i < offs.length; i++) {
+    const dir = _pelletDir(offs[i], aim.yaw, aim.pitch);
     const hit = withLagComp(shooter, sessions, () =>
       phys.hitscanPlayers(bpw.world, eye.x, eye.y, eye.z, dir.x, dir.y, dir.z, ps.Q7q6byi));
     spawnBullet(shooter._ownerSid, eye, dir, (bd > 0 ? bd * DMG_GLOBAL_MULT * LOBBY_DAMAGE_MULT : 0), nid);
-    applyHit(shooter, sessions, hit, eye, clientRay && clientRay.sid);
+    applyHit(shooter, sessions, hit, eye, parsed ? `${i}:${parsed.suffix}` : (clientRay && clientRay.sid));
   }
   destroyMineInLineOfFire(eye, fwd, sessions);
 }
@@ -4943,8 +5027,20 @@ function preTickFire(p, frames) {
   // why ADS (cooldown=2, spaced shots) jerked while non-aim (every-tick fire) didn't show it. Fall back
   // to the countdown only when SERVER_RECOIL is off (atc not advanced then).
   const _cdTicks = weaponCooldownTicks(p.equippedWeaponId);
-  const _fireReady = (SERVER_RECOIL && ps && Number.isFinite(ps.Qezh4wz))
-    ? (ps.Qezh4wz + 1 >= _cdTicks) : (p.fireCooldown <= 0);
+  const _atcGate = SERVER_RECOIL && ps && Number.isFinite(ps.Qezh4wz);
+  // Burst exception (see weaponBurst): a follow-up shot inside the burst window ignores the cooldown.
+  // Qwx5aeh = ticksSinceLastBurst, same pre-increment convention as Qezh4wz.
+  const _burst = _atcGate ? weaponBurst(p.equippedWeaponId) : null;
+  const _burstShot = !!(_burst && Number.isFinite(ps.Qwx5aeh)
+    && ps.Qezh4wz + 1 >= _burst.cooldown && ps.Qwx5aeh + 1 < _burst.window);
+  const _fireReady = _atcGate
+    ? (ps.Qezh4wz + 1 >= _cdTicks || _burstShot) : (p.fireCooldown <= 0);
+  // Fire request = action 5 (trigger held) OR action 18 (the client's own "fire now" auto-fire
+  // sample, bundle :86945). The client marks every shot it takes with 18, including the rest of a
+  // burst after the button is released (InputReader.setForceFire, :80265), when 5 is no longer held.
+  // Reading only 5 turned a Burst Rifle click into one server shot against the client's three.
+  // Bots send only 5, which still works.
+  const _fireHeld = held.has(5) || held.has(18);
   // "a shot is refused while Q3igok2 > 0 (you cannot fire mid-swap)" — bundle :43956, documented on
   // startWeaponSwitch above since we already replicate the TIMER's value (switchTimer/Q3igok2), but
   // never actually consulted it here before this fix. Applies to BOTH guns and melee — the client's
@@ -4955,7 +5051,7 @@ function preTickFire(p, frames) {
   // rare edge case to something a player would actually notice) — the CLIENT correctly refused to
   // play the swing locally while switchTimer was still counting down, but our server had nothing
   // stopping it from confirming the hit anyway.
-  if (held.has(5) && _fireReady && !(p.switchTimer > 0)) {
+  if (_fireHeld && _fireReady && !(p.switchTimer > 0)) {
     if (isGun && (p.reloadTicks > 0 || p.gunAmmo <= 0)) return;          // reloading or empty → no shot
     p.fireCooldown = _cdTicks;
     p._firingThisTick = true;
@@ -6810,6 +6906,12 @@ function _integrateWithExtractedPhysics(playerState, serverTick, explicitFrames)
   if (Number.isFinite(ps.Qalaptp)) ps.Qalaptp--;   // 181 spawn protection, counts DOWN
   if (Number.isFinite(ps.Q5vx943)) ps.Q5vx943--;   // 182 join countdown, counts DOWN
   if (Number.isFinite(ps.Qwx5aeh)) ps.Qwx5aeh++;   // 147 burst-fire window
+  // ...and restart it on a shot that opens a new burst (applyFiredWeaponStateChange, bundle :54611),
+  // at the same point Qezh4wz is reset to 0 for the shot. preTickFire has already decided the shot.
+  if (playerState._firingThisTick && Number.isFinite(ps.Qwx5aeh)) {
+    const burst = weaponBurst(playerState.equippedWeaponId);
+    if (burst && ps.Qwx5aeh > burst.window) ps.Qwx5aeh = 0;
+  }
   if (Number.isFinite(ps.Qezdgca)) ps.Qezdgca++;   // 148 ticks since the player last moved
   if (Number.isFinite(ps.Qd2e7ku)) ps.Qd2e7ku++;   // 190 ticks since a hard landing
   if (Number.isFinite(ps.Qett9p1)) ps.Qett9p1++;   // 196 ticks since spawn
