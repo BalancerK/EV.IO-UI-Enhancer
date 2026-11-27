@@ -26645,53 +26645,63 @@ var EvioSim = (() => {
     }
     p2._firingThisTick = false;
     if (p2.fireCooldown > 0) p2.fireCooldown -= 1;
+    let _reloadDone = false;
     if (p2.reloadTicks > 0 && --p2.reloadTicks <= 0) {
-      p2.gunAmmo = weaponClip(p2._ammoGunId, p2);
       p2.reloadTicks = 0;
+      _reloadDone = true;
     }
+    try {
+      if (p2.deathStateTimer > 0 || p2.healthPoints <= 0) return;
+      const isGun = !WEAPON_MELEE[p2.equippedWeaponId];
+      if (isGun && p2._ammoGunId !== p2.equippedWeaponId) {
+        const isPickup = (nid) => p2.pickupAmmo && Object.prototype.hasOwnProperty.call(p2.pickupAmmo, nid);
+        if (isPickup(p2._ammoGunId)) {
+          if (!p2._pickupMagAmmo) p2._pickupMagAmmo = {};
+          p2._pickupMagAmmo[p2._ammoGunId] = p2.gunAmmo;
+        }
+        p2._ammoGunId = p2.equippedWeaponId;
+        if (isPickup(p2.equippedWeaponId) && p2._pickupMagAmmo && Object.prototype.hasOwnProperty.call(p2._pickupMagAmmo, p2.equippedWeaponId)) {
+          p2.gunAmmo = Math.max(0, Math.min(p2._pickupMagAmmo[p2.equippedWeaponId], weaponClip(p2.equippedWeaponId, p2)));
+        } else {
+          p2.gunAmmo = weaponClip(p2.equippedWeaponId, p2);
+        }
+        p2.reloadTicks = 0;
+      }
+      if (p2.pickupAmmo && Object.prototype.hasOwnProperty.call(p2.pickupAmmo, p2.equippedWeaponId) && p2.gunAmmo <= 0 && (p2.pickupAmmo[p2.equippedWeaponId] || 0) <= 0) {
+        _clearPickupSlot(p2, p2.equippedWeaponId);
+      }
+      const _cdTicks = weaponCooldownTicks(p2.equippedWeaponId);
+      const _atcGate = SERVER_RECOIL && ps2 && Number.isFinite(ps2.Qezh4wz);
+      const _burst = _atcGate ? weaponBurst(p2.equippedWeaponId) : null;
+      const _burstShot = !!(_burst && Number.isFinite(ps2.Qwx5aeh) && ps2.Qezh4wz + 1 >= _burst.cooldown && ps2.Qwx5aeh + 1 < _burst.window);
+      const _fireReady = _atcGate ? ps2.Qezh4wz + 1 >= _cdTicks || _burstShot : p2.fireCooldown <= 0;
+      if (held.has(18)) p2._sendsFirePulse = true;
+      const _fireHeld = p2._sendsFirePulse ? held.has(18) : held.has(5) || held.has(18);
+      if (_fireHeld && _fireReady && !(p2.switchTimer > 0)) {
+        if (isGun && (p2.reloadTicks > 0 || p2.gunAmmo <= 0)) return;
+        p2.fireCooldown = _cdTicks;
+        p2._firingThisTick = true;
+        p2.isDancing = false;
+        p2.isExamining = false;
+        if (isGun) {
+          p2.gunAmmo -= 1;
+          if (p2.pickupAmmo && Object.prototype.hasOwnProperty.call(p2.pickupAmmo, p2.equippedWeaponId)) {
+            p2.pickupAmmo[p2.equippedWeaponId] = Math.max(0, (p2.pickupAmmo[p2.equippedWeaponId] || 0) - 1);
+          }
+        }
+        p2._fireAlpha = SUBFRAME_SHOT ? firingAlphaFromFrames(frames) : 1;
+      }
+    } finally {
+      reloadAfterFire(p2, held, _reloadDone);
+    }
+  }
+  function reloadAfterFire(p2, held, reloadDone) {
     if (p2.deathStateTimer > 0 || p2.healthPoints <= 0) return;
+    if (reloadDone) p2.gunAmmo = weaponClip(p2._ammoGunId, p2);
     const isGun = !WEAPON_MELEE[p2.equippedWeaponId];
-    if (isGun && p2._ammoGunId !== p2.equippedWeaponId) {
-      const isPickup = (nid) => p2.pickupAmmo && Object.prototype.hasOwnProperty.call(p2.pickupAmmo, nid);
-      if (isPickup(p2._ammoGunId)) {
-        if (!p2._pickupMagAmmo) p2._pickupMagAmmo = {};
-        p2._pickupMagAmmo[p2._ammoGunId] = p2.gunAmmo;
-      }
-      p2._ammoGunId = p2.equippedWeaponId;
-      if (isPickup(p2.equippedWeaponId) && p2._pickupMagAmmo && Object.prototype.hasOwnProperty.call(p2._pickupMagAmmo, p2.equippedWeaponId)) {
-        p2.gunAmmo = Math.max(0, Math.min(p2._pickupMagAmmo[p2.equippedWeaponId], weaponClip(p2.equippedWeaponId, p2)));
-      } else {
-        p2.gunAmmo = weaponClip(p2.equippedWeaponId, p2);
-      }
-      p2.reloadTicks = 0;
-    }
-    if (p2.pickupAmmo && Object.prototype.hasOwnProperty.call(p2.pickupAmmo, p2.equippedWeaponId) && p2.gunAmmo <= 0 && (p2.pickupAmmo[p2.equippedWeaponId] || 0) <= 0) {
-      _clearPickupSlot(p2, p2.equippedWeaponId);
-    }
-    if (isGun && !(p2.switchTimer > 0) && p2.reloadTicks <= 0 && p2.gunAmmo < weaponClip(p2.equippedWeaponId, p2) && (p2.gunAmmo <= 0 || held.has(30))) {
+    if (isGun && !(p2.switchTimer > 0) && p2.reloadTicks <= 0 && p2.gunAmmo < weaponClip(p2.equippedWeaponId, p2) && (p2.gunAmmo <= 0 || held && held.has(30))) {
       p2.reloadTicks = weaponReloadTicks(p2.equippedWeaponId, p2);
       p2.lastReloadDuration = p2.reloadTicks;
-    }
-    const _cdTicks = weaponCooldownTicks(p2.equippedWeaponId);
-    const _atcGate = SERVER_RECOIL && ps2 && Number.isFinite(ps2.Qezh4wz);
-    const _burst = _atcGate ? weaponBurst(p2.equippedWeaponId) : null;
-    const _burstShot = !!(_burst && Number.isFinite(ps2.Qwx5aeh) && ps2.Qezh4wz + 1 >= _burst.cooldown && ps2.Qwx5aeh + 1 < _burst.window);
-    const _fireReady = _atcGate ? ps2.Qezh4wz + 1 >= _cdTicks || _burstShot : p2.fireCooldown <= 0;
-    if (held.has(18)) p2._sendsFirePulse = true;
-    const _fireHeld = p2._sendsFirePulse ? held.has(18) : held.has(5) || held.has(18);
-    if (_fireHeld && _fireReady && !(p2.switchTimer > 0)) {
-      if (isGun && (p2.reloadTicks > 0 || p2.gunAmmo <= 0)) return;
-      p2.fireCooldown = _cdTicks;
-      p2._firingThisTick = true;
-      p2.isDancing = false;
-      p2.isExamining = false;
-      if (isGun) {
-        p2.gunAmmo -= 1;
-        if (p2.pickupAmmo && Object.prototype.hasOwnProperty.call(p2.pickupAmmo, p2.equippedWeaponId)) {
-          p2.pickupAmmo[p2.equippedWeaponId] = Math.max(0, (p2.pickupAmmo[p2.equippedWeaponId] || 0) - 1);
-        }
-      }
-      p2._fireAlpha = SUBFRAME_SHOT ? firingAlphaFromFrames(frames) : 1;
     }
   }
   function postTickFire(p2, sessions) {
@@ -27955,9 +27965,11 @@ var EvioSim = (() => {
         playerState._prevHeldKeys = new Set(curHeld);
       }
       if (SERVER_RECOIL) {
-        armRecoil(ps2, playerState.equippedWeaponId);
         physics_extracted_default.tickRecoilPitch(ps2, gs2);
-        if (playerState._firingThisTick) ps2.Qezh4wz = 0;
+        if (playerState._firingThisTick) {
+          ps2.Qezh4wz = 0;
+          armRecoil(ps2, playerState.equippedWeaponId);
+        }
       }
       if (RECOIL_DEBUG && playerState.heldActions && playerState.heldActions.has(5)) {
         try {

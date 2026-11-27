@@ -5037,10 +5037,13 @@ function preTickFire(p, frames) {
   }
   p._firingThisTick = false;
   if (p.fireCooldown > 0) p.fireCooldown -= 1;
-  // Reload countdown: when it finishes, the magazine refills to the clip size (reserve is infinite).
-  // The remaining count is streamed as reloadTimer (opcode 130) so the CLIENT doesn't run its own
-  // independent reload and reconcile-loop (the "reloading loop" bug). reloadTimer<1 ⇒ not reloading.
-  if (p.reloadTicks > 0 && --p.reloadTicks <= 0) { p.gunAmmo = weaponClip(p._ammoGunId, p); p.reloadTicks = 0; }
+  // Reload countdown. The remaining count is streamed as reloadTimer (opcode 130) so the CLIENT doesn't
+  // run its own independent reload and reconcile-loop (the "reloading loop" bug). reloadTimer<1 ⇒ not
+  // reloading. Only the COUNT happens here, at the top of the tick where the client's counters step;
+  // the refill and the start of a new reload happen after the shot — see reloadAfterFire.
+  let _reloadDone = false;
+  if (p.reloadTicks > 0 && --p.reloadTicks <= 0) { p.reloadTicks = 0; _reloadDone = true; }
+  try {
   if (p.deathStateTimer > 0 || p.healthPoints <= 0) return;
   const isGun = !WEAPON_MELEE[p.equippedWeaponId];
   // Keep the magazine pointed at the equipped gun. For a REGULAR primary this gives a full clip —
@@ -5081,19 +5084,6 @@ function preTickFire(p, frames) {
   if (p.pickupAmmo && Object.prototype.hasOwnProperty.call(p.pickupAmmo, p.equippedWeaponId)
       && p.gunAmmo <= 0 && (p.pickupAmmo[p.equippedWeaponId] || 0) <= 0) {
     _clearPickupSlot(p, p.equippedWeaponId);
-  }
-  // Start a reload — AUTO when the mag is empty, MANUAL when action 30 is held with rounds to spare.
-  // This must match the client's own trigger `(ammoInMag<=0 || reloadKey)` exactly and NOT be gated on
-  // holding fire: the client auto-reloads the instant the mag empties, so if our server only reloaded
-  // while firing it would keep streaming "mag 0 / not reloading" and the client would re-trigger every
-  // reconcile → the auto-reload LOOP. Now both sides start the reload on the same tick → reloadTimer (130)
-  // syncs them and there is no loop.
-  // "a reload is refused while Q3igok2 >= 1" (bundle :43981) — see the switchTimer note below the
-  // fire gate for the matching "no firing mid-swap" rule and why both were missing entirely.
-  if (isGun && !(p.switchTimer > 0) && p.reloadTicks <= 0 && p.gunAmmo < weaponClip(p.equippedWeaponId, p) &&
-      (p.gunAmmo <= 0 || held.has(30))) {
-    p.reloadTicks = weaponReloadTicks(p.equippedWeaponId, p);
-    p.lastReloadDuration = p.reloadTicks;   // opcode 152, as the client's own reload sets it
   }
   // Fire gate = the client's EXACT condition: actionTickCounter + 1 >= cooldown (bundle, see :311).
   // atc (Qezh4wz) is the recoil counter, incremented later in tickRecoilPitch, so use the pre-increment
@@ -5156,6 +5146,35 @@ function preTickFire(p, frames) {
     p._fireAlpha = SUBFRAME_SHOT ? firingAlphaFromFrames(frames) : 1;   // render alpha of the firing sub-frame
     // Recoil arm + actionTickCounter reset are NOT done here — they run in the correct client order
     // inside _integrateWithExtractedPhysics (arm uses the PREV tick's atc==0; reset is AFTER l()).
+  }
+  } finally {
+    reloadAfterFire(p, held, _reloadDone);
+  }
+}
+
+// The client's handleReloading, in its place in the tick: AFTER the shot (weapon handler tick =
+// applyFiredWeaponStateChange, then handleReloading). Refill when the countdown has just reached 0, then
+// start a reload — AUTO when the mag is empty, MANUAL when action 30 is held with rounds to spare.
+//
+// Running these before the shot, as this server used to, put both ends of every reload one tick late:
+// the shot that empties the mag on tick T starts the client's reload on T, ours on T+1, and the refill
+// followed a tick later too. Zoom reads the reload timer, so ADS dropped a tick late and came back a tick
+// late, and pitch/zoom disagreed with the client on those ticks (measured tick-for-tick against the
+// client's prediction). The fire gate above still sees the PREVIOUS tick's state, as the client's does
+// (it decides the shot in the frame before the tick): no shot on the refill tick, as on the client.
+//
+// Must match the client's trigger `(clip<=0 || reloadKey)` and NOT be gated on holding fire: the client
+// auto-reloads the instant the mag empties, so a server that only reloaded while firing would stream
+// "mag 0 / not reloading" and the client would re-trigger every reconcile → the auto-reload LOOP.
+// "a reload is refused while Q3igok2 >= 1" (bundle :43981) — the switchTimer check below.
+function reloadAfterFire(p, held, reloadDone) {
+  if (p.deathStateTimer > 0 || p.healthPoints <= 0) return;
+  if (reloadDone) p.gunAmmo = weaponClip(p._ammoGunId, p);
+  const isGun = !WEAPON_MELEE[p.equippedWeaponId];
+  if (isGun && !(p.switchTimer > 0) && p.reloadTicks <= 0 && p.gunAmmo < weaponClip(p.equippedWeaponId, p) &&
+      (p.gunAmmo <= 0 || (held && held.has(30)))) {
+    p.reloadTicks = weaponReloadTicks(p.equippedWeaponId, p);
+    p.lastReloadDuration = p.reloadTicks;   // opcode 152, as the client's own reload sets it
   }
 }
 function postTickFire(p, sessions) {
@@ -7107,10 +7126,19 @@ function _integrateWithExtractedPhysics(playerState, serverTick, explicitFrames)
     // Qswb1wq resets atc=0): (1) arm IFF Qezh4wz===0 left by the PREVIOUS tick's shot, (2) tickRecoilPitch
     // does atc++ then the pitch curve at i>=1, (3) if THIS tick fired, reset atc=0 for next tick's arm.
     // This makes l() run at i=1 (real kick) on sustained fire; the old order ran it at i=0 (Δ=0, no kick).
+    //
+    // The arm runs on the FIRING tick, after its curve step — where the client's does (measured
+    // tick-for-tick: the client's camKnockbackMin/Max change on the shot's own tick). Arming at the
+    // start of the next tick gave the next curve step the same numbers, EXCEPT that the arm reads
+    // zoom: when zoom changed in between — the shot that empties the magazine starts a reload, which
+    // drops ADS on the next tick — the last shot of an aimed spray got the full hip-fire kick (x1
+    // instead of x0.6) and pitch left the client's for the rest of the curve.
     if (SERVER_RECOIL) {
-      armRecoil(ps, playerState.equippedWeaponId);          // self-gates on Qezh4wz===0
       phys.tickRecoilPitch(ps, gs);
-      if (playerState._firingThisTick) ps.Qezh4wz = 0;
+      if (playerState._firingThisTick) {
+        ps.Qezh4wz = 0;
+        armRecoil(ps, playerState.equippedWeaponId);
+      }
     }
     // Recoil debug (EVIO_RECOIL_DEBUG=1): log per-tick while holding fire — does the server FIRE and
     // emit a recoil pitchOffset while MOVING? Confirms/denies "no recoil during sprint/slide/fall".

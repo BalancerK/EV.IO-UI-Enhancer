@@ -953,11 +953,17 @@
     // unopcode'd, camera-recoil-shaped fields found nearest pitch/pitchOffset in the same default
     // player-state object (camKnockbackMin/camKnockbackMax/yOffsetStack) — real properties,
     // plausible by name and position, but not confirmed field-for-field like the two above.
+    //
+    // Pitch and pitchOffset are NO LONGER preserved, and the 6b7/6b9 patches that hid them from the
+    // comparator are gone: they DO have opcodes (140/141), and the server now reproduces the client's
+    // recoil tick for tick (hip fire and ADS: pitch, pitchOffset, the accumulators, zoom, reload).
+    // Keeping the client's own pitch through every correction froze any server/client difference in
+    // place for good — a respawn or a skipped tick left the two apart by a few degrees for the rest of
+    // the life, which a server-built shot then missed by. Now the client takes the server's pitch like
+    // its yaw, as official does. Only fields with no opcode are still carried across.
     window.__EVIO_EXT_PRESERVE_RECON__ = function (oldState, newState) {
         try {
             if (window.__EVIO_EXT_CUSTOM__.enabled && oldState && newState) {
-                newState.pitch = oldState.pitch;
-                newState.pitchOffset = oldState.pitchOffset;
                 newState.camKnockbackMin = oldState.camKnockbackMin;
                 newState.camKnockbackMax = oldState.camKnockbackMax;
                 newState.yOffsetStack = oldState.yOffsetStack;
@@ -991,17 +997,7 @@
     // way back in.
     const patches = [
         {
-            name: '6b7 custom-mode: skip pitch + pitchOffset (production comparator)',
-            from: 'Math.abs(e.pitch-t.pitch)>1e-4||Math.abs(e.pitchOffset-t.pitchOffset)>1e-4||',
-            to:   '(!(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)&&(Math.abs(e.pitch-t.pitch)>1e-4||Math.abs(e.pitchOffset-t.pitchOffset)>1e-4))||',
-        },
-        {
-            name: '6b9 custom-mode: skip pitch + pitchOffset in the DEBUG comparator (the live one)',
-            from: "Math.abs(e.pitch-t.pitch)>1e-4&&a.push('pitch  =>  Server: '+JSON.stringify(e.pitch)+'   Client: '+JSON.stringify(t.pitch)),Math.abs(e.pitchOffset-t.pitchOffset)>1e-4&&a.push('pitchOffset  =>  Server: '+JSON.stringify(e.pitchOffset)+'   Client: '+JSON.stringify(t.pitchOffset)),",
-            to:   "!(window.__EVIO_EXT_CUSTOM__&&window.__EVIO_EXT_CUSTOM__.enabled)&&(Math.abs(e.pitch-t.pitch)>1e-4&&a.push('pitch  =>  Server: '+JSON.stringify(e.pitch)+'   Client: '+JSON.stringify(t.pitch)),Math.abs(e.pitchOffset-t.pitchOffset)>1e-4&&a.push('pitchOffset  =>  Server: '+JSON.stringify(e.pitchOffset)+'   Client: '+JSON.stringify(t.pitchOffset))),",
-        },
-        {
-            name: '6b8 custom-mode: preserve recoil + ammo through reconcile reset',
+            name: '6b8 custom-mode: keep the no-opcode recoil accumulators + weapons through reconcile reset',
             from: 'this.tickHistory[t].clientState.inner=this.sessionHandler.takeServerState(e.body)',
             to:   'this.tickHistory[t].clientState.inner=(window.__EVIO_EXT_PRESERVE_RECON__?window.__EVIO_EXT_PRESERVE_RECON__(this.tickHistory[t].clientState.inner,this.sessionHandler.takeServerState(e.body)):this.sessionHandler.takeServerState(e.body))',
         },
