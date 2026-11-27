@@ -27339,6 +27339,8 @@ var EvioSim = (() => {
         ps2.Qd0yy90 = 0;
       }
       p2.pitchOffset = 0;
+      p2.pitch = 0;
+      if (ps2) ps2.Qcrzrpr = 0;
       const _ownerSession = _live.sessions && p2._ownerSid && _live.sessions.get(p2._ownerSid);
       if (_ownerSession) {
         _ownerSession._posHistory = null;
