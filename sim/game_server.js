@@ -18,6 +18,7 @@ const path = {
   basename: (p) => String(p).split(/[\\/]/).pop(),
 };
 import { encode, decode } from "./msgpack/index.mjs";
+import { encodeWire } from "./wire_encode.js";
 import { buildStatePacket, buildFirstSpawnBody, buildLoadoutDelta } from "./state_builder.js";
 import { computeWeaponStats, ABILITY_COST, ABILITY_TIMER, ABILITY_TABLES, DEFAULT_ABILITY_BUILD } from "./ability_stats.js";
 import cachedWeaponsData from "./weapons.json";
@@ -6569,7 +6570,19 @@ function enqueueClientInput(session, decoded) {
   }
   const q = session.inputQueue;
   if (q.length && clientTick < q[q.length - 1].clientTick) {
-    lose("out-of-order");
+    // Over WebRTC's unordered channel an input can land after a newer one. Its tick has not been
+    // simulated yet (it is newer than lastProcessedClientTick), so put it where it belongs: merged
+    // into that tick's entry, or slotted in before the first later one. Dropping it lost its look
+    // deltas and keys outright.
+    let at = q.length - 1;
+    while (at > 0 && q[at - 1].clientTick >= clientTick) at--;
+    if (q[at].clientTick === clientTick) {
+      const merged = q[at].frames.concat(frames);
+      q[at] = { clientTick, frames: merged.length > MAX_SUBFRAMES_PER_TICK ? merged.slice(merged.length - MAX_SUBFRAMES_PER_TICK) : merged };
+    } else {
+      q.splice(at, 0, { clientTick, frames: frames.length > MAX_SUBFRAMES_PER_TICK ? frames.slice(frames.length - MAX_SUBFRAMES_PER_TICK) : frames });
+    }
+    session._reorderedInputs = (session._reorderedInputs || 0) + 1;
     return;
   }
   if (q.length && clientTick <= q[q.length - 1].clientTick) {
@@ -7497,8 +7510,17 @@ function _integratePlayerSimInner(playerState, dtSeconds = TICK_MS / 1000, serve
   if (playerState.slideCooldownTicks > 0) playerState.slideCooldownTicks--;
 }
 
+// encodeWire = @msgpack/msgpack's output, except a float that float32 holds exactly goes out in 5
+// bytes instead of 9 (lossless). With peers' kinematics reduced to float32 (_f32PeerKinematics), that
+// is 4 bytes saved per number on every peer, every tick.
+let WIRE_FLOAT32 = S.define({
+  key: "wireFloat32", env: "EVIO_WIRE_FLOAT32", type: "bool", def: true,
+  category: "Netcode", label: "Compact numbers (float32 for peers)",
+  desc: "Send other players' position, velocity and view angles at float32 precision (~0.00002 units) "
+      + "in 5 bytes instead of 9. Your own player is never reduced. Off = float64 everywhere.",
+}, (v) => { WIRE_FLOAT32 = v; });
 function sendState(ws, state) {
-  const encoded = encode(state);
+  const encoded = WIRE_FLOAT32 ? encodeWire(state) : encode(state);
   safeSend(ws, encoded, { binary: true });
   return encoded.byteLength;
 }
@@ -7614,6 +7636,20 @@ let DELTA_REFRESH_TICKS = S.define({
   desc: "Full refresh period per recipient (staggered). Bounds how long any lost change can last.",
 }, (v) => { DELTA_REFRESH_TICKS = v; });
 
+let DELTA_PEER_COUNTERS = S.define({
+  key: "deltaPeerCounters", env: "EVIO_DELTA_PEER_COUNTERS", type: "bool", def: true,
+  category: "Netcode", label: "Leave out other players' counters",
+  desc: "Over WebRTC, leave out another player's tick counters (ticks since shot / jump / kill...) while "
+      + "they count by one, as official does; a jump in value is re-sent like any change. A lost packet "
+      + "leaves one a tick behind until the next refresh. Your own counters are always sent.",
+}, (v) => { DELTA_PEER_COUNTERS = v; });
+let DELTA_SPREAD_REFRESH = S.define({
+  key: "deltaSpreadRefresh", env: "EVIO_DELTA_SPREAD", type: "bool", def: true,
+  category: "Netcode", label: "Spread the full refresh over players",
+  desc: "Refresh each other player on its own tick instead of everyone at once, so no packet is several "
+      + "times the usual size (a big packet is split on the wire, and losing any piece loses all of it).",
+}, (v) => { DELTA_SPREAD_REFRESH = v; });
+
 // Player fields whose missing value means "keep" (client decoder, 1-7-1), minus 91/95.
 const DELTA_SET_OPS = new Set([90, 93, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108,
   109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128,
@@ -7643,12 +7679,14 @@ const DELTA_TRAILER_SET = new Set([280, 298, 306, 308]);
 function _splitPlayerBlock(block) {
   if (!Array.isArray(block) || block[0] !== 244 || block.length < 2) return null;
   const fields = [];
+  let at = 2;
   const add = (key, tokens, filterable) => fields.push({
-    key: String(key), tokens, filterable, sig: filterable ? JSON.stringify(tokens) : null,
+    key: String(key), tokens, filterable, sig: filterable ? JSON.stringify(tokens) : null, at,
   });
   let i = 2;
   while (i < block.length) {
     const op = block[i];
+    at = i;
     if (typeof op !== "number" || op === 244) return null;
     if (op === 135) {
       if (block[i + 1] === -1) { add("135-" + block[i + 2], block.slice(i, i + 3), false); i += 3; continue; }
@@ -7662,6 +7700,9 @@ function _splitPlayerBlock(block) {
       const n = DELTA_VEC3_N[block[i + 1]];
       if (n === undefined || i + 2 + n > block.length) return null;
       add(op, block.slice(i, i + 2 + n), true);
+      // A full vector (mode 0) is filtered per component: the client's modes 1-6 leave out x (1),
+      // y (2), z (4) — bundle :65845 — so an unchanged axis (y while running on flat ground) is free.
+      if (block[i + 1] === 0) fields[fields.length - 1].vec = true;
       i += 2 + n;
       continue;
     }
@@ -7678,27 +7719,67 @@ function _splitPlayerBlock(block) {
 }
 
 // Should this (entity, field) go out to this recipient? Records the proposed new "sent" state.
+// Is this a full-refresh tick for this entity? The header, trailer and the recipient's own player
+// refresh on the recipient's phase; each other player on its own (phase + a hash of its id), so a
+// refresh costs one player's worth of bytes per tick instead of a whole lobby's in one packet.
+const _eidPhase = new Map();
+function _deltaFull(ctx, eid) {
+  if (!DELTA_SPREAD_REFRESH || eid === ctx.selfEid || eid.charCodeAt(0) === 35 /* "#" */) return ctx.full;
+  let h = _eidPhase.get(eid);
+  if (h === undefined) {
+    h = 0;
+    for (let i = 0; i < eid.length; i++) h = (h * 31 + eid.charCodeAt(i)) >>> 0;
+    if (_eidPhase.size > 4096) _eidPhase.clear();
+    _eidPhase.set(eid, h);
+  }
+  return (ctx.tick + ctx.rec._deltaPhase + h) % DELTA_REFRESH_TICKS === 0;
+}
 function _deltaInclude(ctx, eid, key, sig) {
   const sent = ctx.rec._deltaSent && ctx.rec._deltaSent.get(eid);
   const prev = sent && sent.get(key);
   if (!prev || prev.sig !== sig) { ctx.pending.push([eid, key, { sig, until: ctx.tick + DELTA_RESEND_TICKS }]); return true; }
-  return ctx.full || ctx.tick <= prev.until;
+  return _deltaFull(ctx, eid) || ctx.tick <= prev.until;
 }
-// A counter: leave it out only when the client will arrive at this exact value by itself.
-function _deltaIncludeCounter(ctx, eid, key, value, dir) {
+// A counter: leave it out only when the client will arrive at this exact value by itself. Over a
+// lossy link (resend = true) a jump in value is re-sent for DELTA_RESEND_TICKS like any change.
+// "Ticks since X" parked at a never-happened value (9999 / 99999) does not move, so it would go out
+// every tick. For another player, the client counting it on from there (10000, 10001...) means the
+// same thing — long ago — so it is left out while both sides are past this; a real event (a reset
+// towards 0) is a jump and goes out as usual. cv then tracks what the client holds.
+const COUNTER_LONG_AGO = 1000;
+function _deltaIncludeCounter(ctx, eid, key, value, dir, resend, peer) {
   const sent = ctx.rec._deltaSent && ctx.rec._deltaSent.get(eid);
   const prev = sent && sent.get(key);
-  const omit = !ctx.full && prev && prev.cv !== undefined && value === prev.cv + dir;
-  ctx.pending.push([eid, key, { cv: value }]);
+  const longAgo = peer && dir > 0 && !!prev && prev.cv >= COUNTER_LONG_AGO && value >= COUNTER_LONG_AGO;
+  const cont = !!prev && prev.cv !== undefined && (longAgo || value === prev.cv + dir);
+  const until = cont ? (prev.until || 0) : (resend ? ctx.tick + DELTA_RESEND_TICKS : 0);
+  const omit = cont && ctx.tick > until && !_deltaFull(ctx, eid);
+  ctx.pending.push([eid, key, { cv: omit && longAgo ? prev.cv + dir : value, until }]);
   return !omit;
 }
 function _deltaAppendPlayerBlock(out, block, split, ctx) {
   if (!ctx || !split) { for (let i = 0; i < block.length; i++) out.push(block[i]); return; }
   const eid = String(block[1]);
+  const peer = ctx.selfEid !== undefined && eid !== ctx.selfEid;
   out.push(244, block[1]);
   for (const f of split) {
+    if (f.vec) {
+      // x, y, z each as its own field; the mode says which are missing.
+      const t = f.tokens;
+      const ix = _deltaInclude(ctx, eid, f.key + "x", String(t[2]));
+      const iy = _deltaInclude(ctx, eid, f.key + "y", String(t[3]));
+      const iz = _deltaInclude(ctx, eid, f.key + "z", String(t[4]));
+      const mode = (ix ? 0 : 1) | (iy ? 0 : 2) | (iz ? 0 : 4);
+      if (mode === 7) continue;
+      out.push(t[0], mode);
+      if (ix) out.push(t[2]);
+      if (iy) out.push(t[3]);
+      if (iz) out.push(t[4]);
+      continue;
+    }
     const inc = f.filterable ? _deltaInclude(ctx, eid, f.key, f.sig)
-      : (f.counter && ctx.reliable) ? _deltaIncludeCounter(ctx, eid, f.key, f.tokens[1], f.counter)
+      : (f.counter && (ctx.reliable || (peer && DELTA_PEER_COUNTERS)))
+        ? _deltaIncludeCounter(ctx, eid, f.key, f.tokens[1], f.counter, !ctx.reliable, peer)
       : true;
     if (inc) {
       for (let k = 0; k < f.tokens.length; k++) out.push(f.tokens[k]);
@@ -7784,6 +7865,25 @@ function _withPeerIdentity(split, peer, tick) {
   return split.concat(extra).sort((x, y) => parseInt(x.key, 10) - parseInt(y.key, 10));
 }
 
+// Another player's position, velocity and view angles only feed what this client DRAWS (interpolated
+// between states anyway), never its reconciler, so float32 is ample: ~0.00002 units at 200 units out.
+// The encoder then writes each as 5 bytes instead of 9. The recipient's own block is never touched.
+const F32_PEER_VEC_OPS = new Set([136, 137]);
+const F32_PEER_ANGLE_OPS = new Set([139, 140, 141]);
+function _f32PeerKinematics(block) {
+  const split = _splitPlayerBlock(block);
+  if (!split) return;
+  for (const f of split) {
+    const op = Number(f.key);
+    if (F32_PEER_VEC_OPS.has(op)) {
+      const n = f.tokens.length;
+      for (let k = 2; k < n; k++) { const v = block[f.at + k]; if (typeof v === "number" && !Number.isInteger(v)) block[f.at + k] = Math.fround(v); }
+    } else if (F32_PEER_ANGLE_OPS.has(op)) {
+      const v = block[f.at + 1]; if (typeof v === "number" && !Number.isInteger(v)) block[f.at + 1] = Math.fround(v);
+    }
+  }
+}
+
 function _cachedPlayerBlock(playerId, playerState, tick, variant = "self") {
   const cacheKey = variant === "peer" ? playerId + "|peer" : playerId;
   let entry = _tickPlayerBlockCache.get(cacheKey);
@@ -7804,6 +7904,7 @@ function _cachedPlayerBlock(playerId, playerState, tick, variant = "self") {
       ? { ...playerState, position: playerState._broadcastPos }
       : playerState;
     appendPlayerTickBody(scratch, playerId, emitState);
+    if (variant === "peer" && WIRE_FLOAT32) _f32PeerKinematics(scratch);
     entry = { tick, ok: true, block: scratch, err: null };
   } catch (err) {
     entry = { tick, ok: false, block: null, err };
@@ -8357,6 +8458,7 @@ function buildTickBody(playerId, tick, playerState = createPlayerSimState(), pee
     const selfEntry = _cachedPlayerBlock(playerId, playerState, tick);
     if (!selfEntry.ok) throw selfEntry.err;
     if (delta && selfEntry.split === undefined) selfEntry.split = _splitPlayerBlock(selfEntry.block);
+    if (delta) delta.selfEid = String(playerId);
     _deltaAppendPlayerBlock(body, selfEntry.block, delta ? selfEntry.split : null, delta);
     for (const peer of peerSessions.values()) {
       // Skip sessions that have not JOINED yet. A session enters `sessions` the moment its
@@ -10686,6 +10788,10 @@ function startServer() {
   // Prevents collision when two tabs connect within the same millisecond.
   // Date.now().toString(36) alone repeats if both tabs connect at the same ms.
   let _sessionSeq = 0;
+  // Player ids ride in every 244 block of every packet, so they are kept short: a tag picked once per
+  // server run (so a client that somehow outlives a restart never sees an old id reused) plus a
+  // counter. "local-k7f2" is 10 bytes on the wire where "local-mi3k9x2a-5" was 17.
+  const _runTag = Math.floor(Math.random() * 36 * 36).toString(36).padStart(2, "0");
 
   // ── Global game loop ────────────────────────────────────────────────────
   // Root cause of the two-tab infinite-rejoin bug: each connection previously
@@ -11569,7 +11675,7 @@ function startServer() {
     const spawnIndex = sessions.size;
     const sp = spawnPoints[spawnIndex % spawnPoints.length];
     _botSeq++;
-    const sessionId = `bot-${Date.now().toString(36)}-${_botSeq.toString(36)}`;
+    const sessionId = `bot-${_runTag}${_botSeq.toString(36)}`;
     const playerId = sessionId;
     const playerState = createPlayerSimState({
       x: sp.x, y: sp.y, z: sp.z,
@@ -11950,7 +12056,7 @@ function startServer() {
     const clearJoinTimer = () => { if (joinTimer) { clearTimeout(joinTimer); joinTimer = null; } };
     // Include sequence suffix to prevent same-ms collision when two tabs connect
     // simultaneously — Date.now() alone returns the same value within 1ms.
-    const sessionId = `local-${Date.now().toString(36)}-${(++_sessionSeq).toString(36)}`;
+    const sessionId = `local-${_runTag}${(++_sessionSeq).toString(36)}`;
     let accepted = false;
     // Must match the ID assigned by the WebSocket wrapper. The ev.io client
     // constructs the game adapter with d.Qgggv79, which is parsed from the

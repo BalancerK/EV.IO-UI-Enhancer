@@ -90,8 +90,56 @@ function backpressureSend(network, peerId, channel, data) {
     network.send(channel, peerId, data);
 }
 
+// The data channels, by label in this order (netlib numbers them 0, 1, 2 and both ends must agree on
+// the labels, so none may be added, removed or reordered). netlib's own "unreliable" is ORDERED with
+// no retransmits: when one packet is lost, every later one waits in the receiver's SCTP stack until
+// the sender gives the lost one up (a fast-retransmit round, ~1 RTT plus a few packets), then they all
+// arrive at once — a hitch, then a burst of 3-4 states the client throws away to catch up. Unordered
+// delivers each packet the moment it lands. Ordering is a sending-side choice per message, so a peer
+// still on the old setting talks to this one without trouble.
+const RTC_DATA_CHANNELS = {
+    reliable: { ordered: true },
+    unreliable: { ordered: false, maxRetransmits: 0 },
+    control: { ordered: false },
+};
+
+// The server tick of a state packet ([sync, echoTick, [1, tick, ...]]), read straight from the
+// msgpack bytes, or null for anything else. Only used to drop a state that arrives after a newer
+// one (possible now the channel is unordered): applying it would step every player back a tick.
+function readInt(v, p) {
+    const b = v.getUint8(p);
+    if (b <= 0x7f) return [b, p + 1];
+    if (b >= 0xe0) return [b - 0x100, p + 1];
+    switch (b) {
+        case 0xcc: return [v.getUint8(p + 1), p + 2];
+        case 0xcd: return [v.getUint16(p + 1), p + 3];
+        case 0xce: return [v.getUint32(p + 1), p + 5];
+        case 0xd0: return [v.getInt8(p + 1), p + 2];
+        case 0xd1: return [v.getInt16(p + 1), p + 3];
+        case 0xd2: return [v.getInt32(p + 1), p + 5];
+        default: return null;
+    }
+}
+function stateTick(data) {
+    try {
+        const v = data instanceof ArrayBuffer ? new DataView(data)
+            : ArrayBuffer.isView(data) ? new DataView(data.buffer, data.byteOffset, data.byteLength) : null;
+        if (!v || v.byteLength < 6 || v.getUint8(0) !== 0x93) return null;
+        let r = readInt(v, 1); if (!r) return null;            // sync
+        r = readInt(v, r[1]); if (!r) return null;             // echoed client tick
+        let p = r[1];
+        const h = v.getUint8(p);                               // body array header
+        if (h >= 0x90 && h <= 0x9f) p += 1; else if (h === 0xdc) p += 3; else if (h === 0xdd) p += 5; else return null;
+        if (v.getUint8(p) !== 0x01) return null;               // opcode 1 = tick
+        r = readInt(v, p + 1);
+        return r ? r[0] : null;
+    } catch (e) { return null; }
+}
+const STALE_GUARD_AFTER = 40;   // packets: leave a join's first ~2s (its bootstraps) alone
+
 function connectNetwork(gameId, signalingUrl) {
     const network = new netlib.Network(gameId, netlib.DefaultRTCConfiguration, signalingUrl);
+    network.dataChannels = RTC_DATA_CHANNELS;   // before any peer exists: channels are made per peer
     return new Promise((resolve, reject) => {
         network.once('ready', () => resolve(network));
         network.once('failed', () => reject(new Error('netlib signaling failed')));
@@ -162,10 +210,28 @@ port.onMessage.addListener((msg) => {
                 const serverPeerId = lobbyInfo && lobbyInfo.customData && lobbyInfo.customData.serverPeerId;
                 if (!serverPeerId) throw new Error('joined lobby has no customData.serverPeerId — refusing to trust it as the server');
 
-                joinNetworks.set(requestId, { network, serverPeerId });
+                const entry = { network, serverPeerId, newestTick: null, received: 0, stale: 0 };
+                joinNetworks.set(requestId, entry);
 
                 network.on('message', (peer, channel, data) => {
                     if (peer.id !== serverPeerId) return;
+                    if (channel === 'unreliable' && typeof data !== 'string') {
+                        const t = stateTick(data);
+                        if (t !== null) {
+                            entry.received++;
+                            // Strictly older only: a packet with the same tick (an introduction
+                            // riding next to the tick body) always goes through. A big step back
+                            // is a restarted host, not a late packet.
+                            if (entry.newestTick !== null && t < entry.newestTick && entry.newestTick - t < 200
+                                && entry.received > STALE_GUARD_AFTER) {
+                                if (++entry.stale <= 3 || entry.stale % 100 === 0) {
+                                    console.log(`[evio-offscreen] join: dropped a late state (tick ${t} after ${entry.newestTick}; ${entry.stale} so far)`);
+                                }
+                                return;
+                            }
+                            if (entry.newestTick === null || t > entry.newestTick || entry.newestTick - t >= 200) entry.newestTick = t;
+                        }
+                    }
                     send({ type: 'join:message', requestId, data: toWire(data), isBinary: typeof data !== 'string' });
                 });
                 network.on('disconnected', (peer) => {
