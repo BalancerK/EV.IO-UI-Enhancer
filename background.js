@@ -824,6 +824,7 @@ async function handleAdminRequest(path, method, body) {
                     testMap: sim.gameServer.mapLoader.activeTestMap(),
                     maps: sim.gameServer.mapLoader.listMaps().map((m) => ({
                         nid: m.nid, title: m.title, cached: cached.has(m.nid), inRotation: m.inRotation,
+                        thumbUrl: m.thumbUrl || null, extra: !!m.extra,
                     })),
                 },
             };

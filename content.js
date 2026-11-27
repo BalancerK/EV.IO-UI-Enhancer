@@ -556,194 +556,172 @@ window.addEventListener('load', () => {
     background: rgba(255,255,255,0.14);
     border-color: rgba(255,255,255,0.35);
 }
-/* Same reasoning as .ev-field-input above, plus: the native options POPUP always renders on a
-   white background regardless of page theme, so the <option>s need their own explicit color
-   even though the closed <select> itself is already covered by .ev-field-input. */
-#ev-host-public option,
-.ev-qa-select option {
-    color: #000;
-    background: #fff;
+/* The native options popup ignores the page theme: options get explicit colours. */
+#ev_host_module select option {
+    color: #fff;
+    background: #1b1b1b;
+}
+/* ----- Host a Lobby: laid out like the official Private Game panel (#new_game_module). The
+   site's own classes (game_param_div, small_toggle, switch/slider, form-control, newLineDiv,
+   col-4, map_name_heading) carry its theme; these rules only add what the official panel styles
+   by its id, plus the hosting controls it has no equivalent for. ----- */
+#ev_host_module {
+    overflow-y: auto;
+    overscroll-behavior: contain;
 }
 #ev_host_module .module_content {
-    max-width: 900px;
+    max-width: 1000px;
 }
-.ev-host-layout {
-    display: flex;
-    gap: 24px;
-    align-items: flex-start;
-    margin-top: 4px;
+/* The official switches sit top-right (float right: the first one in the markup is rightmost). */
+#ev_host_module .small_toggle {
+    float: right;
+    margin: 0 0 20px 20px;
 }
-.ev-host-col-left {
-    flex: 0 0 340px;
-    min-width: 0;
+#ev_host_module .container-new-game {
+    display: flow-root;
 }
-.ev-host-col-right {
-    flex: 1;
-    min-width: 0;
+#ev_host_module .container-new-game label {
+    display: block;
 }
-.ev-host-card {
-    margin-top: 6px;
-    padding: 16px;
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 10px;
+#ev_host_module .small_toggle label {
+    max-width: 70px;
+    line-height: 1.2;
+    min-height: 29px;
 }
-.ev-host-actions {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin-top: 18px;
+#ev_host_module .switch.ev-switch-block {
+    display: block;
 }
-.ev-btn-primary {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 11px 16px;
-    border-radius: 7px;
-    border: 0;
-    background: #7dff7d;
-    color: #0c1f0c;
-    font-weight: 700;
-    font-size: 14px;
-    cursor: pointer;
-    font-family: inherit;
-    transition: filter 0.15s ease, transform 0.05s ease;
+#ev-host-name {
+    width: 240px;
 }
-.ev-btn-primary:hover { filter: brightness(1.08); }
-.ev-btn-primary:active { transform: scale(0.99); }
-.ev-btn-primary.ev-btn-stop {
-    background: #ff6969;
-    color: #230707;
+#ev_host_module input[type="number"].form-control {
+    width: 96px;
 }
-.ev-btn-secondary {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 10px 16px;
-    border-radius: 7px;
-    border: 1px solid rgba(255,255,255,0.22);
-    background: rgba(255,255,255,0.05);
-    color: #fff;
-    font-weight: 600;
-    font-size: 13px;
-    cursor: pointer;
-    font-family: inherit;
-    transition: background-color 0.15s ease, border-color 0.15s ease;
-}
-.ev-btn-secondary:hover {
-    background: rgba(255,255,255,0.11);
-    border-color: rgba(255,255,255,0.35);
-}
-.ev-quick-admin {
-    padding: 16px;
-    background: rgba(255,255,255,0.03);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 10px;
-    max-height: 70vh;
-    overflow-y: auto;
-}
-.ev-qa-heading {
-    margin: 0;
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: #7dff7d;
-}
-.ev-qa-section {
-    margin-top: 16px;
-    padding-top: 14px;
-    border-top: 1px solid rgba(255,255,255,0.08);
-}
-.ev-qa-section:first-of-type {
-    margin-top: 14px;
-}
-.ev-qa-section-title {
-    font-size: 13px;
-    font-weight: 700;
-    margin-bottom: 8px;
-    opacity: 0.9;
-}
-.ev-qa-section-title-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 8px;
-}
-.ev-qa-section-title-row .ev-qa-section-title {
-    margin-bottom: 0;
-}
-.ev-qa-setting {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    padding: 6px 0;
-}
-.ev-qa-setting-label {
-    font-size: 12.5px;
-    opacity: 0.9;
-    flex: 1;
-}
-.ev-qa-setting-ctl {
-    flex-shrink: 0;
-}
-.ev-qa-number {
-    width: 88px;
-    box-sizing: border-box;
-    color: #000;
-    background: #fff;
-    border: 1px solid rgba(0,0,0,0.3);
-    border-radius: 6px;
-    padding: 5px 7px;
-    font-size: 13px;
-    text-align: right;
-}
-.ev-qa-select {
-    width: 130px;
-    box-sizing: border-box;
-    color: #000;
-    background: #fff;
-    border: 1px solid rgba(0,0,0,0.3);
-    border-radius: 6px;
-    padding: 5px 7px;
-    font-size: 13px;
-}
-.ev-qa-chips {
+.ev-host-actions,
+.ev-host-row,
+.ev-host-mapbar,
+.ev-host-chips {
     display: flex;
     flex-wrap: wrap;
-    gap: 6px;
+    gap: 10px;
+    align-items: center;
 }
-.ev-qa-chip {
-    padding: 6px 10px;
-    font-size: 12px;
-    font-weight: 600;
-    border-radius: 999px;
-    border: 1px solid rgba(255,255,255,0.22);
-    background: rgba(255,255,255,0.06);
+.ev-host-row .form-control {
+    flex: 1 1 260px;
+    min-width: 0;
+    max-width: 460px;
+}
+.ev-host-btn,
+.ev-host-chip {
+    height: 38px;
+    padding: 0 18px;
+    border: 0;
+    border-radius: 0;
+    background: rgba(0, 0, 0, 0.3);
     color: #fff;
-    cursor: pointer;
+    font-family: inherit;
+    font-size: 16px;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
     white-space: nowrap;
-    transition: background-color 0.15s ease, border-color 0.15s ease;
+    cursor: pointer;
+    transition: background-color 0.15s ease, filter 0.15s ease;
 }
-.ev-qa-chip:hover {
-    background: rgba(255,255,255,0.13);
-    border-color: rgba(255,255,255,0.35);
+.ev-host-chip {
+    height: 32px;
+    padding: 0 12px;
+    font-size: 14px;
+    text-transform: none;
 }
-.ev-qa-chip-danger {
-    border-color: rgba(255,105,105,0.4);
-    color: #ff9a9a;
+.ev-host-btn:hover,
+.ev-host-chip:hover {
+    background: rgba(255, 255, 255, 0.14);
 }
-.ev-qa-chip-danger:hover {
-    background: rgba(255,105,105,0.14);
-    border-color: rgba(255,105,105,0.6);
+.ev-host-btn:focus-visible,
+.ev-host-chip:focus-visible {
+    outline: 2px solid #2196f3;
+    outline-offset: 1px;
 }
-.ev-qa-status {
-    font-size: 12px;
-    opacity: 0.85;
-    margin-top: 14px;
-    min-height: 16px;
+.ev-host-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
 }
-#ev-custom-lobbies-status,
-#ev-host-status {
+/* The official switches' blue (input:checked + .slider) marks the main action. */
+.ev-host-btn-go,
+.ev-host-btn-go:hover {
+    background: #2196f3;
+}
+.ev-host-btn-go:hover {
+    filter: brightness(1.12);
+}
+.ev-host-btn-go.ev-btn-stop,
+.ev-host-btn-go.ev-btn-stop:hover {
+    background: #e53935;
+}
+.ev-host-chip-danger {
+    color: #ff8a80;
+}
+.ev-host-status-line {
+    font-size: 15px;
+    min-height: 22px;
+    margin: 8px 0 14px;
+}
+.ev-host-status-line span + span:not(:empty)::before {
+    content: " · ";
+    color: rgba(255, 255, 255, 0.5);
+}
+.ev-host-block {
+    margin-bottom: 16px;
+}
+.ev-host-label {
+    display: block;
+    font-size: 16px;
+    font-weight: 400;
+    margin: 0 0 5px;
+}
+.ev-host-note {
+    font-size: 14px;
+    opacity: 0.75;
+}
+.ev-host-mapbar {
+    margin: 22px 0 20px;
+}
+#ev-host-map-source {
+    width: auto;
+}
+/* Map tiles: the official .col-4 + .map_name_heading, with the image rules the official panel
+   scopes to its own id (#new_game_module img). */
+.ev-map-tile {
+    cursor: pointer;
+    vertical-align: top;
+}
+.ev-map-thumb {
+    display: block;
+    width: 166px;
+    height: 70px;
+    max-width: none;
+    object-fit: cover;
+    box-sizing: border-box;
+    border: 1px solid transparent;
+    background: rgba(255, 255, 255, 0.06);
+    opacity: 0.9;
+    transition: 0.3s;
+}
+.ev-map-tile:hover .ev-map-thumb {
+    opacity: 1;
+    filter: brightness(120%) contrast(120%) saturate(120%);
+}
+.ev-map-tile.ev-map-active .ev-map-thumb {
+    border-color: #fff;
+    opacity: 1;
+}
+.ev-map-tile.ev-map-active {
+    cursor: default;
+}
+.ev-map-tile.ev-map-busy .ev-map-thumb {
+    opacity: 0.35;
+}
+#ev-custom-lobbies-status {
     font-size: 13px;
     opacity: 0.8;
     margin-top: 4px;
@@ -893,7 +871,7 @@ window.addEventListener('load', () => {
         const visSelect = document.getElementById('ev-host-public');
         if (urlInput) urlInput.value = stored.evioSignalingUrl || DEFAULT_SIGNALING_URL;
         if (nameInput) nameInput.value = stored.evioHostName || '';
-        if (visSelect) visSelect.value = stored.evioHostPublic || 'public';
+        if (visSelect) visSelect.checked = (stored.evioHostPublic || 'public') === 'public';
     }
 
     // Only writes keys whose field actually exists on the current page — the signaling URL now
@@ -908,7 +886,7 @@ window.addEventListener('load', () => {
         const patch = {};
         if (urlInput) patch.evioSignalingUrl = urlInput.value.trim();
         if (nameInput) patch.evioHostName = nameInput.value.trim();
-        if (visSelect) patch.evioHostPublic = visSelect.value;
+        if (visSelect) patch.evioHostPublic = visSelect.checked ? 'public' : 'private';
         await chrome.storage.local.set(patch);
     }
 
@@ -987,7 +965,7 @@ window.addEventListener('load', () => {
 
         await saveHostingSettings();
         const isPublicEl = document.getElementById('ev-host-public');
-        const isPublic = isPublicEl ? isPublicEl.value === 'public' : true;
+        const isPublic = isPublicEl ? isPublicEl.checked : true;
 
         setHostStatus('Starting…', false);
         const resp = await chrome.runtime.sendMessage({ type: 'startHosting', isPublic });
@@ -1017,34 +995,57 @@ window.addEventListener('load', () => {
         return resp.body;
     }
 
-    // The exact settings this panel exposes, in the order they're shown — a deliberately curated
-    // subset of the full dashboard's ~70, picked for "things worth tuning mid-match without
-    // leaving the game." Everything about rendering/committing a given one (its control type,
-    // min/max/step, reset) is still read live from /api/settings, same as the full dashboard —
-    // only WHICH keys show up here is hardcoded.
-    const QUICK_ADMIN_SETTING_KEYS = [
-        'gameMode', 'roundTicks', 'damageScale', 'botDamageMult', 'botWeaponPickupsEnabled',
-        'botFriendlyFire', 'swordBotImpulseEnabled', 'swordBotGrenadesEnabled',
-        'botCount', 'swordBotCount', 'botLevel', 'swordBotLevel',
-        'gravity', 'throwableCooldownScale', 'teleportCooldownScale',
+    // ----- the Host a Lobby panel's live settings -----
+    // The panel mirrors ev.io's own Private Game panel (#new_game_module): small switches floated
+    // top-right, rows of labelled .game_param_div controls, then a map source select and a grid of
+    // map thumbnails. It reuses the site's own style classes (game_param_div, small_toggle,
+    // switch/slider, form-control, newLineDiv, col-4, map_name_heading) so it follows the site's
+    // theme. It never reuses an official element id or .private_map_thumb: those belong to the
+    // site's own code, and a click on one starts an official private game.
+    //
+    // Every control is a live server setting: read from /api/settings, committed on change.
+    // `scale` converts the panel's units to the setting's: gravity is shown the way the official
+    // panel shows it (0.07 per tick²), which is our 28 u/s² (x 20²).
+    const HOST_TOGGLES = [   // floated right like the official switches, so the first is rightmost
+        { key: 'swordBotGrenadesEnabled', label: 'Sword Grenades' },
+        { key: 'swordBotImpulseEnabled', label: 'Sword Impulse' },
+        { key: 'botFriendlyFire', label: 'Bot Friendly Fire' },
+        { key: 'botWeaponPickupsEnabled', label: 'Bot Pickups' },
     ];
+    const HOST_PARAMS = [
+        { key: 'gravity', label: 'Gravity', scale: 400, step: 0.01, digits: 3 },
+        { key: 'damageScale', label: 'Dmg Multiplier' },
+        { key: 'botDamageMult', label: 'Bot Dmg' },
+        { key: 'botCount', label: 'Bot Count' },
+        { key: 'botLevel', label: 'Bot Level' },
+        { key: 'swordBotCount', label: 'Sword Bots' },
+        { key: 'swordBotLevel', label: 'Sword Bot Level' },
+        { key: 'throwableCooldownScale', label: 'Grenade Cooldown' },
+        { key: 'teleportCooldownScale', label: 'Teleport Cooldown' },
+    ];
+    // Reset Default resets exactly the settings this panel shows.
+    const QUICK_ADMIN_SETTING_KEYS = ['gameMode', 'roundTicks',
+        ...HOST_TOGGLES.map((t) => t.key), ...HOST_PARAMS.map((p) => p.key)];
+    const GAME_MODE_LABELS = { deathmatch: 'Deathmatch', survival: 'Survival' };
+    const TICKS_PER_MINUTE = 1200;   // the official Duration select's values: 1200 = 1 min at 20 Hz
+
     const ANNOUNCE_QUICK_MESSAGES = [
-        ['Round starting — good luck!', '🏁 Round starting'],
-        ['Server restarting shortly.', '🔧 Restarting soon'],
-        ['Switching map — hold on.', '🗺️ Map change'],
-        ['gg!', '👏 gg'],
+        ['Round starting — good luck!', 'Round starting'],
+        ['Server restarting shortly.', 'Restarting soon'],
+        ['Switching map — hold on.', 'Map change'],
+        ['gg!', 'gg'],
     ];
     // [action, arg-or-null, label, needsConfirm]
     const MATCH_ACTIONS = [
-        ['restartround', null, '🔄 Restart round', false],
-        ['endround', null, '⏭️ End round now', false],
-        ['addtime', 1200, '➕ 1 min', false],
-        ['addtime', -1200, '➖ 1 min', false],
-        ['healall', null, '💚 Heal all', false],
-        ['respawnall', null, '♻️ Respawn all', false],
-        ['gather', null, '🧲 Gather all', false],
-        ['slapall', 18, '👋 Slap all', false],
-        ['killall', null, '💀 Kill all', true],
+        ['restartround', null, 'Restart Round', false],
+        ['endround', null, 'End Round', false],
+        ['addtime', 1200, '+1 Min', false],
+        ['addtime', -1200, '−1 Min', false],
+        ['healall', null, 'Heal All', false],
+        ['respawnall', null, 'Respawn All', false],
+        ['gather', null, 'Gather All', false],
+        ['slapall', 18, 'Slap All', false],
+        ['killall', null, 'Kill All', true],
     ];
 
     function quickAdminStatus(msg, isError) {
@@ -1077,271 +1078,210 @@ window.addEventListener('load', () => {
         for (const key of QUICK_ADMIN_SETTING_KEYS) {
             try { await adminFetch('/api/settings/reset', 'POST', { key }); } catch (e) { /* keep going */ }
         }
-        quickAdminStatus('All quick-admin settings reset to default.', false);
+        quickAdminStatus('Settings reset to default.', false);
         loadQuickAdminSettings();
     }
 
-    // Rebuilds just the settings control list from a fresh /api/settings read — called after
-    // every commit/reset so a value that failed validation (clamped, rejected) is shown as what
-    // it ACTUALLY is server-side, not what was typed.
+    // Official-style building blocks.
+    function hostParamDiv(labelText, control) {
+        const d = document.createElement('div');
+        d.className = 'game_param_div';
+        const l = document.createElement('label');
+        l.textContent = labelText;
+        if (control.id) l.htmlFor = control.id;
+        d.appendChild(l);
+        d.appendChild(control);
+        return d;
+    }
+    function hostToggleDiv(labelText, input) {
+        const d = document.createElement('div');
+        d.className = 'small_toggle game_param_div';
+        const l = document.createElement('label');
+        l.textContent = labelText;
+        l.htmlFor = input.id;
+        const sw = document.createElement('label');
+        sw.className = 'switch ev-switch-block';
+        input.type = 'checkbox';
+        const slider = document.createElement('span');
+        slider.className = 'slider';
+        sw.appendChild(input);
+        sw.appendChild(slider);
+        d.appendChild(l);
+        d.appendChild(sw);
+        return d;
+    }
+    function hostSelect(id, options, onChange) {
+        const sel = document.createElement('select');
+        sel.className = 'form-control';
+        sel.id = id;
+        stopKeyPropagation(sel);
+        options.forEach(([value, label]) => {
+            const o = document.createElement('option');
+            o.value = value; o.textContent = label;
+            sel.appendChild(o);
+        });
+        if (onChange) sel.addEventListener('change', () => onChange(sel.value));
+        return sel;
+    }
+    function hostButton(label, cls, onClick) {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = cls;
+        b.textContent = label;
+        if (onClick) b.addEventListener('click', onClick);
+        return b;
+    }
+
+    // Writes fresh values from /api/settings into the panel's controls (built once, in
+    // ensureHostModule). Called after every commit/reset, so a value the server clamped or rejected
+    // shows as what it really is. The control being typed into is left alone.
     async function loadQuickAdminSettings() {
-        const host = document.getElementById('ev-quick-admin-settings');
-        if (!host) return;
+        if (!document.getElementById('ev_host_module')) return;
         let all;
         try { all = (await adminFetch('/api/settings')).settings; } catch (e) { return; }
         const byKey = new Map(all.map((s) => [s.key, s]));
-        host.innerHTML = '';
-        for (const key of QUICK_ADMIN_SETTING_KEYS) {
-            const s = byKey.get(key);
-            if (s) host.appendChild(buildSettingRow(s));
+        const focused = document.activeElement;
+
+        const mode = document.getElementById('ev-host-mode');
+        const ms = byKey.get('gameMode');
+        if (mode && ms) {
+            if (Array.isArray(ms.choices) && mode.options.length !== ms.choices.length) {
+                mode.textContent = '';
+                ms.choices.forEach((c) => {
+                    const o = document.createElement('option');
+                    o.value = c; o.textContent = GAME_MODE_LABELS[c] || c;
+                    mode.appendChild(o);
+                });
+            }
+            if (mode !== focused) mode.value = ms.value;
         }
-    }
 
-    function buildSettingRow(s) {
-        const row = document.createElement('div');
-        row.className = 'ev-qa-setting';
-
-        const label = document.createElement('label');
-        label.className = 'ev-qa-setting-label';
-        label.textContent = s.label;
-
-        const ctl = document.createElement('div');
-        ctl.className = 'ev-qa-setting-ctl';
-
-        let input;
-        if (s.type === 'bool') {
-            input = document.createElement('input');
-            input.type = 'checkbox';
-            input.checked = !!s.value;
-            input.addEventListener('change', () => commitSetting(s.key, input.checked));
-        } else if (s.type === 'enum' && Array.isArray(s.choices)) {
-            input = document.createElement('select');
-            input.className = 'ev-qa-select';
-            stopKeyPropagation(input);
-            s.choices.forEach((choice) => {
+        const dur = document.getElementById('ev-host-duration');
+        const rs = byKey.get('roundTicks');
+        if (dur && rs && dur !== focused) {
+            // A round length that is not a whole minute (set from the dashboard) gets its own entry.
+            dur.querySelectorAll('option[data-custom]').forEach((o) => o.remove());
+            if (!dur.querySelector(`option[value="${rs.value}"]`)) {
                 const o = document.createElement('option');
-                o.value = choice; o.textContent = choice;
-                if (choice === s.value) o.selected = true;
-                input.appendChild(o);
-            });
-            input.addEventListener('change', () => commitSetting(s.key, input.value));
-        } else {
-            input = document.createElement('input');
-            input.type = 'number';
-            input.className = 'ev-qa-number';
-            input.value = s.value;
-            if (s.min !== null && s.min !== undefined) input.min = s.min;
-            if (s.max !== null && s.max !== undefined) input.max = s.max;
-            input.step = (s.step !== null && s.step !== undefined) ? s.step : (s.type === 'int' ? 1 : 'any');
-            stopKeyPropagation(input);
-            input.addEventListener('change', () => commitSetting(s.key, input.value));
+                o.value = String(rs.value); o.dataset.custom = '1';
+                o.textContent = `${(rs.value / TICKS_PER_MINUTE).toFixed(2).replace(/\.?0+$/, '')} min`;
+                dur.insertBefore(o, dur.firstChild);
+            }
+            dur.value = String(rs.value);
         }
-        ctl.appendChild(input);
-        row.appendChild(label);
-        row.appendChild(ctl);
-        return row;
+
+        for (const t of HOST_TOGGLES) {
+            const el = document.getElementById(`ev-host-set-${t.key}`);
+            const s = byKey.get(t.key);
+            if (el && s) el.checked = !!s.value;
+        }
+        for (const p of HOST_PARAMS) {
+            const el = document.getElementById(`ev-host-set-${p.key}`);
+            const s = byKey.get(p.key);
+            if (!el || !s) continue;
+            const k = p.scale || 1;
+            if (s.min !== null && s.min !== undefined) el.min = s.min / k;
+            if (s.max !== null && s.max !== undefined) el.max = s.max / k;
+            el.step = p.step || ((s.step !== null && s.step !== undefined) ? s.step / k : (s.type === 'int' ? 1 : 'any'));
+            el.title = s.desc || '';
+            if (el !== focused) el.value = p.digits ? +(s.value / k).toFixed(p.digits) : s.value / k;
+        }
     }
 
+    // ----- the map grid -----
+    let hostMapsData = null;
+    let hostMapSource = 'official';
+    let hostMapSwitching = null;
     async function loadQuickAdminMaps() {
-        const select = document.getElementById('ev-quick-admin-map');
-        if (!select) return;
-        let data;
-        try { data = await adminFetch('/api/maps'); } catch (e) { return; }
-        select.innerHTML = '';
-        // While a test map runs, the dropdown shows it as a placeholder entry (it is in no list, so
-        // picking any real map — even the one it was on before — is a genuine change).
-        if (data.testMap) {
-            const o = document.createElement('option');
-            o.value = ''; o.textContent = `${data.testMap.name} (test map)`; o.disabled = true; o.selected = true;
-            select.appendChild(o);
+        if (!document.getElementById('ev-quick-admin-map')) return;
+        try { hostMapsData = await adminFetch('/api/maps'); } catch (e) { return; }
+        renderHostMaps();
+    }
+    function renderHostMaps() {
+        const grid = document.getElementById('ev-quick-admin-map');
+        if (!grid || !hostMapsData) return;
+        const data = hostMapsData;
+        grid.textContent = '';
+        const tile = (title, thumbUrl, active, onClick) => {
+            const t = document.createElement('div');
+            t.className = 'col-4 ev-map-tile' + (active ? ' ev-map-active' : '') + (hostMapSwitching === title ? ' ev-map-busy' : '');
+            t.title = active ? `${title} (playing now)` : `Switch to ${title}`;
+            let img;
+            if (thumbUrl) {
+                img = document.createElement('img');
+                img.src = thumbUrl;
+                img.alt = '';
+                img.loading = 'lazy';
+            } else {
+                img = document.createElement('div');
+            }
+            img.className = 'ev-map-thumb';
+            const name = document.createElement('div');
+            name.className = 'map_name_heading';
+            name.textContent = title;
+            t.appendChild(img);
+            t.appendChild(name);
+            if (onClick) t.addEventListener('click', onClick);
+            return t;
+        };
+        // A running test map is in no list: it is shown first, as the map being played.
+        if (data.testMap) grid.appendChild(tile(`${data.testMap.name} (test)`, null, true, null));
+        const maps = (data.maps || [])
+            .filter((m) => hostMapSource === 'all' || (hostMapSource === 'community') === !!m.extra)
+            // Newest first, like the official grid.
+            .sort((a, b) => (Number(b.nid) || 0) - (Number(a.nid) || 0));
+        maps.forEach((m) => grid.appendChild(tile(m.title, m.thumbUrl, !data.testMap && m.title === data.active,
+            () => switchHostMap(m.title))));
+        if (!maps.length) {
+            const empty = document.createElement('div');
+            empty.className = 'ev-host-note';
+            empty.textContent = hostMapSource === 'community' ? 'No community maps yet.' : 'No maps.';
+            grid.appendChild(empty);
         }
-        (data.maps || []).forEach((m) => {
-            const o = document.createElement('option');
-            o.value = m.title; o.textContent = m.title;
-            if (!data.testMap && m.title === data.active) o.selected = true;
-            select.appendChild(o);
-        });
         const note = document.getElementById('ev-quick-admin-testmap');
         if (note) note.textContent = data.testMap ? `Playing test map: ${data.testMap.name}` : '';
     }
+    async function switchHostMap(title) {
+        if (hostMapSwitching) return;
+        if (hostMapsData && !hostMapsData.testMap && hostMapsData.active === title) {
+            quickAdminStatus(`${title} is already the map.`, false);
+            return;
+        }
+        hostMapSwitching = title;
+        renderHostMaps();
+        quickAdminStatus(`Switching map to ${title}…`, false);
+        try {
+            await adminFetch('/api/map', 'POST', { map: title });
+            quickAdminStatus(`Map switched to ${title}.`, false);
+        } catch (e) {
+            quickAdminStatus(`Map switch failed: ${(e && e.message) || e}`, true);
+        } finally {
+            hostMapSwitching = null;
+            loadQuickAdminMaps();
+        }
+    }
 
-    function buildQuickAdminPanel() {
-        const panel = document.createElement('div');
-        panel.id = 'ev-quick-admin';
-        panel.className = 'ev-quick-admin';
-
-        const heading = document.createElement('h3');
-        heading.className = 'ev-qa-heading';
-        heading.textContent = 'QUICK ADMIN';
-        panel.appendChild(heading);
-        const sub = document.createElement('p');
-        sub.className = 'ev-field-hint';
-        sub.textContent = 'Changes apply live to your hosted server. For the full dashboard (players, parity, presets), use Open Admin Dashboard.';
-        panel.appendChild(sub);
-
-        // ----- Map -----
-        const mapSection = document.createElement('div');
-        mapSection.className = 'ev-qa-section';
-        const mapHeading = document.createElement('div');
-        mapHeading.className = 'ev-qa-section-title';
-        mapHeading.textContent = 'Map';
-        const mapSelect = document.createElement('select');
-        mapSelect.id = 'ev-quick-admin-map';
-        mapSelect.className = 'ev-field-input';
-        stopKeyPropagation(mapSelect);
-        mapSelect.addEventListener('change', async () => {
-            quickAdminStatus(`Switching map to ${mapSelect.value}…`, false);
+    // Test map: any .evmap from this computer, played by everyone in the lobby. It stays in
+    // memory only (not cached, not in the map list) — see background.js's /api/testmap.
+    function loadTestMapFile(f, btn) {
+        if (f.size > 32 * 1048576) { quickAdminStatus('Test maps can be at most 32 MB.', true); return; }
+        quickAdminStatus(`Loading test map ${f.name}…`, false);
+        btn.disabled = true;
+        const reader = new FileReader();
+        reader.onerror = () => { btn.disabled = false; quickAdminStatus('Could not read that file.', true); };
+        reader.onload = async () => {
+            const url = String(reader.result);
             try {
-                await adminFetch('/api/map', 'POST', { map: mapSelect.value });
-                quickAdminStatus(`Map switched to ${mapSelect.value}.`, false);
+                const r = await adminFetch('/api/testmap', 'POST', { name: f.name, data: url.slice(url.indexOf(',') + 1) });
+                quickAdminStatus(`Test map ${r.map} loaded (${r.spawns} spawns). Loading another map removes it.`, false);
                 loadQuickAdminMaps();
             } catch (e) {
-                quickAdminStatus(`Map switch failed: ${(e && e.message) || e}`, true);
+                quickAdminStatus(`Test map failed: ${(e && e.message) || e}`, true);
+            } finally {
+                btn.disabled = false;
             }
-        });
-        mapSection.appendChild(mapHeading);
-        mapSection.appendChild(mapSelect);
-
-        // Test map: any .evmap from this computer, played by everyone in the lobby. It stays in
-        // memory only (not cached, not in the map list) — see background.js's /api/testmap.
-        const testRow = document.createElement('div');
-        testRow.className = 'ev-field-row';
-        const testFile = document.createElement('input');
-        testFile.type = 'file';
-        testFile.accept = '.evmap';
-        testFile.id = 'ev-quick-admin-testmap-file';
-        testFile.style.display = 'none';
-        const testBtn = document.createElement('button');
-        testBtn.type = 'button';
-        testBtn.className = 'ev-btn-reset';
-        testBtn.textContent = 'Load test map…';
-        testBtn.title = 'Play a .evmap from this computer with everyone in your lobby. It is not saved or added to the map list.';
-        testBtn.addEventListener('click', () => testFile.click());
-        testFile.addEventListener('change', () => {
-            const f = testFile.files && testFile.files[0];
-            testFile.value = '';
-            if (!f) return;
-            if (f.size > 32 * 1048576) { quickAdminStatus('Test maps can be at most 32 MB.', true); return; }
-            quickAdminStatus(`Loading test map ${f.name}…`, false);
-            testBtn.disabled = true;
-            const reader = new FileReader();
-            reader.onerror = () => { testBtn.disabled = false; quickAdminStatus('Could not read that file.', true); };
-            reader.onload = async () => {
-                const url = String(reader.result);
-                try {
-                    const r = await adminFetch('/api/testmap', 'POST', { name: f.name, data: url.slice(url.indexOf(',') + 1) });
-                    quickAdminStatus(`Test map ${r.map} loaded (${r.spawns} spawns). Loading another map removes it.`, false);
-                    loadQuickAdminMaps();
-                } catch (e) {
-                    quickAdminStatus(`Test map failed: ${(e && e.message) || e}`, true);
-                } finally {
-                    testBtn.disabled = false;
-                }
-            };
-            reader.readAsDataURL(f);
-        });
-        const testNote = document.createElement('span');
-        testNote.id = 'ev-quick-admin-testmap';
-        testNote.className = 'ev-field-hint';
-        testRow.appendChild(testBtn);
-        testRow.appendChild(testNote);
-        testRow.appendChild(testFile);
-        mapSection.appendChild(testRow);
-        panel.appendChild(mapSection);
-
-        // ----- Settings -----
-        const settingsSection = document.createElement('div');
-        settingsSection.className = 'ev-qa-section';
-        const settingsHeadingRow = document.createElement('div');
-        settingsHeadingRow.className = 'ev-qa-section-title-row';
-        const settingsHeading = document.createElement('div');
-        settingsHeading.className = 'ev-qa-section-title';
-        settingsHeading.textContent = 'Settings';
-        const resetAllBtn = document.createElement('button');
-        resetAllBtn.type = 'button';
-        resetAllBtn.className = 'ev-btn-reset';
-        resetAllBtn.textContent = 'Reset Default';
-        resetAllBtn.addEventListener('click', resetAllQuickSettings);
-        settingsHeadingRow.appendChild(settingsHeading);
-        settingsHeadingRow.appendChild(resetAllBtn);
-        const settingsList = document.createElement('div');
-        settingsList.id = 'ev-quick-admin-settings';
-        settingsSection.appendChild(settingsHeadingRow);
-        settingsSection.appendChild(settingsList);
-        panel.appendChild(settingsSection);
-
-        // ----- Announce -----
-        const announceSection = document.createElement('div');
-        announceSection.className = 'ev-qa-section';
-        const announceHeading = document.createElement('div');
-        announceHeading.className = 'ev-qa-section-title';
-        announceHeading.textContent = 'Announce';
-        const announceRow = document.createElement('div');
-        announceRow.className = 'ev-field-row';
-        const announceInput = document.createElement('input');
-        announceInput.className = 'ev-field-input';
-        announceInput.placeholder = 'Message to every connected player…';
-        stopKeyPropagation(announceInput);
-        const announceSendBtn = document.createElement('button');
-        announceSendBtn.type = 'button';
-        announceSendBtn.className = 'ev-btn-reset';
-        announceSendBtn.textContent = 'Send';
-        function fireAnnounce() {
-            const msg = announceInput.value.trim();
-            if (!msg) { quickAdminStatus('Nothing to announce.', true); return; }
-            serverAction('announce', msg).then(() => { announceInput.value = ''; });
-        }
-        announceSendBtn.addEventListener('click', fireAnnounce);
-        announceInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') fireAnnounce(); });
-        announceRow.appendChild(announceInput);
-        announceRow.appendChild(announceSendBtn);
-        const announceChips = document.createElement('div');
-        announceChips.className = 'ev-qa-chips';
-        ANNOUNCE_QUICK_MESSAGES.forEach(([msg, label]) => {
-            const chip = document.createElement('button');
-            chip.type = 'button';
-            chip.className = 'ev-qa-chip';
-            chip.textContent = label;
-            chip.addEventListener('click', () => serverAction('announce', msg));
-            announceChips.appendChild(chip);
-        });
-        announceSection.appendChild(announceHeading);
-        announceSection.appendChild(announceRow);
-        announceSection.appendChild(announceChips);
-        panel.appendChild(announceSection);
-
-        // ----- Match -----
-        const matchSection = document.createElement('div');
-        matchSection.className = 'ev-qa-section';
-        const matchHeading = document.createElement('div');
-        matchHeading.className = 'ev-qa-section-title';
-        matchHeading.textContent = 'Match';
-        const matchChips = document.createElement('div');
-        matchChips.className = 'ev-qa-chips';
-        MATCH_ACTIONS.forEach(([action, arg, label, needsConfirm]) => {
-            const chip = document.createElement('button');
-            chip.type = 'button';
-            chip.className = 'ev-qa-chip' + (needsConfirm ? ' ev-qa-chip-danger' : '');
-            chip.textContent = label;
-            chip.addEventListener('click', () => {
-                if (needsConfirm && !confirm('Kill every connected player?')) return;
-                serverAction(action, arg === null ? undefined : arg);
-            });
-            matchChips.appendChild(chip);
-        });
-        matchSection.appendChild(matchHeading);
-        matchSection.appendChild(matchChips);
-        panel.appendChild(matchSection);
-
-        const status = document.createElement('div');
-        status.id = 'ev-quick-admin-status';
-        status.className = 'ev-qa-status';
-        panel.appendChild(status);
-
-        loadQuickAdminMaps();
-        loadQuickAdminSettings();
-
-        return panel;
+        };
+        reader.readAsDataURL(f);
     }
 
     function stopHosting() {
@@ -1739,163 +1679,205 @@ window.addEventListener('load', () => {
         content.className = 'module_content';
 
         const title = document.createElement('h2');
-        title.textContent = 'HOST A LOBBY';
+        title.textContent = 'Host a Lobby';
         content.appendChild(title);
 
-        // Card wrapper for the form fields — the signaling URL moved to the Lobbies module's
-        // Custom tab (see ensureLobbyModule), since it's a property of reaching custom lobbies at
-        // all, not something specific to hosting your own.
-        const card = document.createElement('div');
-        card.className = 'ev-host-card';
+        // Laid out like the official Private Game panel: switches floated top-right, then rows of
+        // labelled controls (floated .game_param_div, each row ended by a .newLineDiv).
+        const form = document.createElement('div');
+        form.className = 'container-new-game';
 
-        const hostNameGroup = document.createElement('div');
-        hostNameGroup.className = 'ev-field-group';
-        const hostNameLab = document.createElement('label');
-        hostNameLab.className = 'ev-field-label';
-        hostNameLab.textContent = 'Lobby name shown to other players (required)';
+        // Visibility is the lobby's own setting (kept in chrome.storage), not a server setting.
+        const publicInput = document.createElement('input');
+        publicInput.id = 'ev-host-public';
+        publicInput.addEventListener('change', saveHostingSettings);
+        form.appendChild(hostToggleDiv('Public', publicInput));
+        for (const t of HOST_TOGGLES) {
+            const input = document.createElement('input');
+            input.id = `ev-host-set-${t.key}`;
+            input.addEventListener('change', () => commitSetting(t.key, input.checked));
+            form.appendChild(hostToggleDiv(t.label, input));
+        }
+        form.appendChild(Object.assign(document.createElement('div'), { className: 'newLineDiv' }));
+
         const hostNameInput = document.createElement('input');
         hostNameInput.id = 'ev-host-name';
+        hostNameInput.type = 'text';
+        hostNameInput.className = 'form-control';
         hostNameInput.placeholder = 'e.g. "Alice\'s lobby"';
-        hostNameInput.className = 'ev-field-input';
+        hostNameInput.maxLength = 40;
         stopKeyPropagation(hostNameInput);
-        hostNameGroup.appendChild(hostNameLab);
-        hostNameGroup.appendChild(hostNameInput);
-
-        const hostVisGroup = document.createElement('div');
-        hostVisGroup.className = 'ev-field-group';
-        const hostVisLab = document.createElement('label');
-        hostVisLab.className = 'ev-field-label';
-        hostVisLab.textContent = 'Visibility';
-        const hostVisSelect = document.createElement('select');
-        hostVisSelect.id = 'ev-host-public';
-        hostVisSelect.className = 'ev-field-input';
-        stopKeyPropagation(hostVisSelect);
-        [['public', 'Public'], ['private', 'Private']]
-            .forEach(([value, label]) => {
-                const o = document.createElement('option');
-                o.value = value; o.textContent = label;
-                hostVisSelect.appendChild(o);
-            });
-        hostVisGroup.appendChild(hostVisLab);
-        hostVisGroup.appendChild(hostVisSelect);
-
-        // Persist as you go, not only at Start Hosting time — switching tabs away and back (or
-        // closing this panel) shouldn't lose what was typed.
+        // Persist as you go: closing the panel or reloading shouldn't lose what was typed.
         hostNameInput.addEventListener('change', saveHostingSettings);
-        hostVisSelect.addEventListener('change', saveHostingSettings);
+        form.appendChild(hostParamDiv('Lobby Name', hostNameInput));
 
-        card.appendChild(hostNameGroup);
-        card.appendChild(hostVisGroup);
+        form.appendChild(hostParamDiv('Game Mode', hostSelect('ev-host-mode',
+            [['deathmatch', 'Deathmatch']], (v) => commitSetting('gameMode', v))));
+        const minutes = [];
+        for (let m = 1; m <= 20; m++) minutes.push([String(m * TICKS_PER_MINUTE), `${m} min`]);
+        form.appendChild(hostParamDiv('Duration', hostSelect('ev-host-duration', minutes,
+            (v) => commitSetting('roundTicks', Number(v)))));
+        form.appendChild(Object.assign(document.createElement('div'), { className: 'newLineDiv' }));
 
+        for (const p of HOST_PARAMS) {
+            const input = document.createElement('input');
+            input.type = 'number';
+            input.className = 'form-control';
+            input.id = `ev-host-set-${p.key}`;
+            stopKeyPropagation(input);
+            input.addEventListener('change', () => {
+                const v = Number(input.value);
+                if (input.value === '' || !Number.isFinite(v)) { loadQuickAdminSettings(); return; }
+                commitSetting(p.key, p.scale ? +(v * p.scale).toFixed(4) : v);
+            });
+            form.appendChild(hostParamDiv(p.label, input));
+        }
+        form.appendChild(Object.assign(document.createElement('div'), { className: 'newLineDiv' }));
+        content.appendChild(form);
+
+        // ----- hosting -----
         const actions = document.createElement('div');
         actions.className = 'ev-host-actions';
-
-        const hostToggleBtn = document.createElement('button');
-        hostToggleBtn.id = 'ev-host-toggle';
-        hostToggleBtn.type = 'button';
-        hostToggleBtn.className = 'ev-btn-primary';
-        hostToggleBtn.textContent = 'Start Hosting';
-
-        // Opens in a new tab rather than inline — it's a full dashboard (settings, player list,
-        // match controls), not something that belongs squeezed into this lobby popup. Works
-        // whether or not hosting is currently active: status/settings panels still render (the
-        // settings registry exists from the moment the bundle loads), only player-list/action
-        // panels show empty until someone's actually connected.
-        const adminBtn = document.createElement('button');
-        adminBtn.id = 'ev-host-admin';
-        adminBtn.type = 'button';
-        adminBtn.className = 'ev-btn-secondary';
-        adminBtn.textContent = 'Open Admin Dashboard';
-        adminBtn.addEventListener('click', () => {
-            chrome.runtime.sendMessage({ type: 'openAdmin' });
-        });
-
-        hostToggleBtn.addEventListener('click', () => {
+        const hostToggleBtn = hostButton('Start Hosting', 'ev-host-btn ev-host-btn-go', () => {
             if (hostingPort) stopHosting();
             else startHosting();
         });
-
+        hostToggleBtn.id = 'ev-host-toggle';
+        // The full dashboard (players, parity, presets) opens in its own tab.
+        const adminBtn = hostButton('Admin Dashboard', 'ev-host-btn', () => chrome.runtime.sendMessage({ type: 'openAdmin' }));
+        adminBtn.id = 'ev-host-admin';
+        const resetBtn = hostButton('Reset Default', 'ev-host-btn', resetAllQuickSettings);
+        resetBtn.title = 'Put every setting on this panel back to its default';
         actions.appendChild(hostToggleBtn);
         actions.appendChild(adminBtn);
+        actions.appendChild(resetBtn);
+        content.appendChild(actions);
 
-        // Shown once hosting actually starts (see startHosting()/attachHostingPort()) — a direct
-        // link bypasses needing whoever you're sharing it with to find your lobby in their own
-        // Custom tab list at all, which matters for a Private lobby especially (it's not even
-        // listed there) but is just more convenient for Public ones too.
+        const statusLine = document.createElement('div');
+        statusLine.className = 'ev-host-status-line';
+        const hostStatus = document.createElement('span');
+        hostStatus.id = 'ev-host-status';
+        const qaStatus = document.createElement('span');
+        qaStatus.id = 'ev-quick-admin-status';
+        statusLine.appendChild(hostStatus);
+        statusLine.appendChild(qaStatus);
+        content.appendChild(statusLine);
+
+        // Shown once hosting starts: a direct link means invited players need not find the lobby
+        // in their own list (a Private lobby is not listed at all).
         const shareBox = document.createElement('div');
         shareBox.id = 'ev-host-share';
-        shareBox.className = 'ev-field-group';
+        shareBox.className = 'ev-host-block';
         shareBox.style.display = 'none';
         const shareLab = document.createElement('label');
-        shareLab.className = 'ev-field-label';
-        shareLab.textContent = 'Share this link to invite players';
+        shareLab.className = 'ev-host-label';
+        shareLab.htmlFor = 'ev-host-share-link';
+        shareLab.textContent = 'Invite Link';
         const shareRow = document.createElement('div');
-        shareRow.className = 'ev-field-row';
+        shareRow.className = 'ev-host-row';
         const shareInput = document.createElement('input');
         shareInput.id = 'ev-host-share-link';
-        shareInput.className = 'ev-field-input';
+        shareInput.className = 'form-control';
         shareInput.readOnly = true;
         stopKeyPropagation(shareInput);
         shareInput.addEventListener('focus', () => shareInput.select());
-        const shareCopyBtn = document.createElement('button');
-        shareCopyBtn.type = 'button';
-        shareCopyBtn.className = 'ev-btn-reset';
-        shareCopyBtn.textContent = 'Copy Link';
-        shareCopyBtn.addEventListener('click', async () => {
+        const shareCopyBtn = hostButton('Copy Link', 'ev-host-btn', async () => {
             try {
                 await navigator.clipboard.writeText(shareInput.value);
-                shareCopyBtn.textContent = 'Copied!';
             } catch (e) {
                 shareInput.select();
                 document.execCommand('copy');
-                shareCopyBtn.textContent = 'Copied!';
             }
+            shareCopyBtn.textContent = 'Copied!';
             setTimeout(() => { shareCopyBtn.textContent = 'Copy Link'; }, 1500);
         });
+        // The same navigation a lobby row's click does, for the host's own lobby.
+        const joinOwnBtn = hostButton('Join Lobby', 'ev-host-btn ev-host-btn-go', () => { window.location.href = shareInput.value; });
         shareRow.appendChild(shareInput);
         shareRow.appendChild(shareCopyBtn);
+        shareRow.appendChild(joinOwnBtn);
         shareBox.appendChild(shareLab);
         shareBox.appendChild(shareRow);
+        content.appendChild(shareBox);
 
-        // Same navigation a Custom-tab lobby row's own click does (including for your OWN lobby,
-        // labelled "(yours)" there) — this is just that shortcut surfaced right next to the link
-        // instead of making the host go find their own row in the list to join the match they
-        // just started.
-        const joinOwnBtn = document.createElement('button');
-        joinOwnBtn.type = 'button';
-        joinOwnBtn.className = 'ev-btn-secondary';
-        joinOwnBtn.style.marginTop = '8px';
-        joinOwnBtn.style.width = '100%';
-        joinOwnBtn.textContent = 'Join Lobby';
-        joinOwnBtn.addEventListener('click', () => {
-            window.location.href = shareInput.value;
+        // ----- match controls (live, on the hosted server) -----
+        const matchBlock = document.createElement('div');
+        matchBlock.className = 'ev-host-block';
+        const matchLab = document.createElement('label');
+        matchLab.className = 'ev-host-label';
+        matchLab.textContent = 'Match';
+        const matchChips = document.createElement('div');
+        matchChips.className = 'ev-host-chips';
+        MATCH_ACTIONS.forEach(([action, arg, label, needsConfirm]) => {
+            matchChips.appendChild(hostButton(label, 'ev-host-chip' + (needsConfirm ? ' ev-host-chip-danger' : ''), () => {
+                if (needsConfirm && !confirm('Kill every connected player?')) return;
+                serverAction(action, arg === null ? undefined : arg);
+            }));
         });
-        shareBox.appendChild(joinOwnBtn);
+        matchBlock.appendChild(matchLab);
+        matchBlock.appendChild(matchChips);
+        content.appendChild(matchBlock);
 
-        actions.appendChild(shareBox);
+        const announceBlock = document.createElement('div');
+        announceBlock.className = 'ev-host-block';
+        const announceLab = document.createElement('label');
+        announceLab.className = 'ev-host-label';
+        announceLab.htmlFor = 'ev-host-announce';
+        announceLab.textContent = 'Announce';
+        const announceRow = document.createElement('div');
+        announceRow.className = 'ev-host-row';
+        const announceInput = document.createElement('input');
+        announceInput.id = 'ev-host-announce';
+        announceInput.className = 'form-control';
+        announceInput.placeholder = 'Message to every connected player…';
+        stopKeyPropagation(announceInput);
+        function fireAnnounce() {
+            const msg = announceInput.value.trim();
+            if (!msg) { quickAdminStatus('Nothing to announce.', true); return; }
+            serverAction('announce', msg).then(() => { announceInput.value = ''; });
+        }
+        announceInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') fireAnnounce(); });
+        announceRow.appendChild(announceInput);
+        announceRow.appendChild(hostButton('Send', 'ev-host-btn', fireAnnounce));
+        ANNOUNCE_QUICK_MESSAGES.forEach(([msg, label]) => {
+            announceRow.appendChild(hostButton(label, 'ev-host-chip', () => serverAction('announce', msg)));
+        });
+        announceBlock.appendChild(announceLab);
+        announceBlock.appendChild(announceRow);
+        content.appendChild(announceBlock);
 
-        const hostStatus = document.createElement('div');
-        hostStatus.id = 'ev-host-status';
+        // ----- map: source select + thumbnail grid, like the official panel -----
+        const mapBar = document.createElement('div');
+        mapBar.className = 'ev-host-mapbar';
+        const source = hostSelect('ev-host-map-source',
+            [['official', 'Official'], ['community', 'Community'], ['all', 'All Maps']],
+            (v) => { hostMapSource = v; renderHostMaps(); });
+        source.value = hostMapSource;
+        const testFile = document.createElement('input');
+        testFile.type = 'file';
+        testFile.accept = '.evmap';
+        testFile.id = 'ev-quick-admin-testmap-file';
+        testFile.style.display = 'none';
+        const testBtn = hostButton('Load Test Map…', 'ev-host-btn', () => testFile.click());
+        testBtn.title = 'Play a .evmap from this computer with everyone in your lobby. It is not saved or added to the map list.';
+        testFile.addEventListener('change', () => {
+            const f = testFile.files && testFile.files[0];
+            testFile.value = '';
+            if (f) loadTestMapFile(f, testBtn);
+        });
+        const testNote = document.createElement('span');
+        testNote.id = 'ev-quick-admin-testmap';
+        testNote.className = 'ev-host-note';
+        mapBar.appendChild(source);
+        mapBar.appendChild(testBtn);
+        mapBar.appendChild(testNote);
+        mapBar.appendChild(testFile);
+        content.appendChild(mapBar);
 
-        // Two columns below the title: the hosting form/actions on the left (its own fixed
-        // width, same as before), the quick-admin panel on the right — lets you tune the server
-        // you're hosting without leaving this screen or opening the full dashboard in a new tab.
-        const layout = document.createElement('div');
-        layout.className = 'ev-host-layout';
-
-        const leftCol = document.createElement('div');
-        leftCol.className = 'ev-host-col-left';
-        leftCol.appendChild(card);
-        leftCol.appendChild(actions);
-        leftCol.appendChild(hostStatus);
-
-        const rightCol = document.createElement('div');
-        rightCol.className = 'ev-host-col-right';
-        rightCol.appendChild(buildQuickAdminPanel());
-
-        layout.appendChild(leftCol);
-        layout.appendChild(rightCol);
-        content.appendChild(layout);
+        const grid = document.createElement('div');
+        grid.id = 'ev-quick-admin-map';
+        grid.className = 'ev-host-maps';
+        content.appendChild(grid);
 
         mod.appendChild(close);
         mod.appendChild(content);
@@ -1906,16 +1888,12 @@ window.addEventListener('load', () => {
         });
 
         loadHostingSettingsIntoForm();
-        // Sets the button's initial text AND color (ev-btn-stop) to match reality if hosting is
-        // already active by the time this panel is first built (e.g. the early-reconnect check
-        // near the top of this file already re-attached the port before this was ever opened) —
-        // matters more now that the button's whole color, not just its label, depends on it.
+        // Matches the button's text and colour to reality if hosting was already active when the
+        // panel was first built (the early-reconnect check re-attaches the port on page load).
         paintHostingButton();
         if (hostingLobbyCode) showShareLink(hostingLobbyCode);
-        // No reconciliation needed here any more — the early check right after injectPageHook
-        // (top of this file) already re-attaches the keep-alive port on every page load if
-        // hosting is still live, regardless of whether this panel is ever opened. By the time
-        // this panel builds, hostingPort/hostingLobbyCode already reflect current reality.
+        loadQuickAdminSettings();
+        loadQuickAdminMaps();
     }
 
     function showHostModule() {
