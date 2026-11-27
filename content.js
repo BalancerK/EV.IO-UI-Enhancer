@@ -1465,6 +1465,8 @@ window.addEventListener('load', () => {
         }
     });
 
+    // manifest.json already runs page-socket-hook.js in the MAIN world at document_start, before
+    // any page script; this injection is only a fallback (the hook ignores a second copy).
     (function injectPageHook() {
         const script = document.createElement('script');
         script.src = chrome.runtime.getURL('page-socket-hook.js');

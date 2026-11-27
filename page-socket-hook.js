@@ -48,6 +48,8 @@
         try { return String(window.localStorage.getItem('evioExtAllowBuilds') || '').split(',').map((b) => b.trim()).filter(Boolean); }
         catch (e) { return []; }
     };
+    // Set when content.js injected this file; empty when it runs as a MAIN-world content script
+    // (the patch-set hash in the fingerprint covers updated patches either way).
     const EXT_VERSION = (document.currentScript && document.currentScript.dataset && document.currentScript.dataset.extVersion) || '';
     let compatState = 'pending';   // 'pending' -> 'ok' (patched) or 'safe' (stock game)
     const hooksActive = () => compatState === 'ok';
@@ -1163,13 +1165,15 @@
             });
     }
 
-    // If the bundle is never intercepted (ev.io changed how it loads the game), every hook has
-    // stayed off; say so.
+    // A page that runs the game but whose bundle was never intercepted (ev.io changed how it loads
+    // the game) has every hook off; say so. Pages without the game (rankings, profiles, ...) have
+    // no bundle at all: the hooks just stay off there, without a notice.
     window.addEventListener('load', () => {
         setTimeout(() => {
-            if (!_intercepted && compatState === 'pending') {
-                setCompat('safe', { build: null, reasons: ['the game bundle was not found (ev.io may have changed how the game loads)'] });
-            }
+            if (_intercepted || compatState !== 'pending') return;
+            const gameScript = [...document.scripts].find((sc) => /\/bundle\.js(\?|$)/i.test(sc.src || '') && sc.type !== 'javascript/blocked');
+            if (!gameScript) return;
+            setCompat('safe', { build: bundleBuild(gameScript.src), reasons: ['the game started before the extension could check it (reload the page; if this keeps happening, ev.io changed how the game loads)'] });
         }, 15000);
     });
 
