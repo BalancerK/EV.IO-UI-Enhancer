@@ -3723,6 +3723,18 @@ function _recomputeHitChannels() {
   PLAYERMAP_EVENTS   = HIT_EVENTS && _playerMapOpt;
 }
 const _pendingHitEvents = [];
+// How many ticks a damage event / medal keeps going out (its eventAge counts 0, 1, 2...). Official
+// keeps events for 5 (SERVER_EVENTS_MAX_AGE, after which the client drops them itself) over TCP; we
+// ride a lossy channel, so the repeat is what gets a hit confirmation through a lost packet. The
+// client counts each event once (it remembers ids for 10 ticks), so a repeat is never a second hit,
+// a second damage number or a second medal.
+let EVENT_REPEAT_TICKS = S.define({
+  key: "eventRepeatTicks", env: "EVIO_EVENT_REPEAT", type: "int", def: 4, min: 1, max: 5,
+  category: "Netcode", label: "Send hit / medal events for (ticks)",
+  desc: "A damage event or medal is repeated in this many consecutive packets, so one lost packet "
+      + "cannot lose it. A lost hit confirmation makes your hit count twice on the enemy's health for "
+      + "a moment (a false death animation). 1 = once, as before.",
+}, (v) => { EVENT_REPEAT_TICKS = v; });
 let _hitEventIdCounter = 1;
 const _hitNoSidStats = { n: 0 };
 function spawnHitEvent(attackerSid, victimSid, dmg, critMult, hitPos, aimPos, shotSid) {
@@ -3752,6 +3764,16 @@ function spawnHitEvent(attackerSid, victimSid, dmg, critMult, hitPos, aimPos, sh
   });
   if (_pendingHitEvents.length > 256) _pendingHitEvents.splice(0, _pendingHitEvents.length - 256);
 }
+function _ageEvents(list) {
+  if (!list.length) return;
+  let w = 0;
+  for (let r = 0; r < list.length; r++) {
+    const e = list[r];
+    e.age = (e.age | 0) + 1;
+    if (e.age < EVENT_REPEAT_TICKS) list[w++] = e;
+  }
+  list.length = w;
+}
 function buildPlayerMapBlock() {
   const out = [];
   for (const h of _pendingHitEvents) {
@@ -3761,7 +3783,7 @@ function buildPlayerMapBlock() {
     out.push(
       67, key,
       57, key,
-      58, 0,
+      58, h.age | 0,
       59, h.victim,
       60, h.attacker,
       61, round(h.dmg, 4),
@@ -3782,7 +3804,7 @@ function buildPlayerMapBlock() {
     out.push(
       74, m.id,
       69, m.id,
-      70, 0,
+      70, m.age | 0,
       71, m.recipient,
       72, m.medal,
       73, m.points,
@@ -11424,8 +11446,9 @@ function startServer() {
     }
     // Bullets + hit events were emitted to every recipient this tick; drop them so each is sent once.
     if (_pendingBullets.length) _pendingBullets.length = 0;
-    if (_pendingHitEvents.length) _pendingHitEvents.length = 0;
-  _pendingMedals.length = 0;
+    // Damage events and medals stay for EVENT_REPEAT_TICKS packets (see its definition), ageing by one.
+    _ageEvents(_pendingHitEvents);
+    _ageEvents(_pendingMedals);
     // Entity removals (grenade detonations, shot mines, owner-death cleanup) were emitted as 268,-1,key
     // to every recipient this tick — clear AFTER the broadcast so firing-time + sim-time removals both go.
     // Roll this tick's removals into the re-announce window, then age the window by one tick. Done
@@ -12893,6 +12916,7 @@ const serverExports = {
   applyHit,
   tickHealthRegen,
   _pendingMedals,
+  _ageEvents,
   MEDAL_KEY,
   awardMedal,
   recordDamager,

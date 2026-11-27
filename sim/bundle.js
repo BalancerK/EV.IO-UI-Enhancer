@@ -25577,6 +25577,19 @@ var EvioSim = (() => {
     PLAYERMAP_EVENTS = HIT_EVENTS && _playerMapOpt;
   }
   var _pendingHitEvents = [];
+  var EVENT_REPEAT_TICKS = define({
+    key: "eventRepeatTicks",
+    env: "EVIO_EVENT_REPEAT",
+    type: "int",
+    def: 4,
+    min: 1,
+    max: 5,
+    category: "Netcode",
+    label: "Send hit / medal events for (ticks)",
+    desc: "A damage event or medal is repeated in this many consecutive packets, so one lost packet cannot lose it. A lost hit confirmation makes your hit count twice on the enemy's health for a moment (a false death animation). 1 = once, as before."
+  }, (v2) => {
+    EVENT_REPEAT_TICKS = v2;
+  });
   var _hitEventIdCounter = 1;
   var _hitNoSidStats = { n: 0 };
   function spawnHitEvent(attackerSid, victimSid, dmg, critMult, hitPos, aimPos, shotSid) {
@@ -25607,6 +25620,16 @@ var EvioSim = (() => {
     });
     if (_pendingHitEvents.length > 256) _pendingHitEvents.splice(0, _pendingHitEvents.length - 256);
   }
+  function _ageEvents(list2) {
+    if (!list2.length) return;
+    let w2 = 0;
+    for (let r2 = 0; r2 < list2.length; r2++) {
+      const e2 = list2[r2];
+      e2.age = (e2.age | 0) + 1;
+      if (e2.age < EVENT_REPEAT_TICKS) list2[w2++] = e2;
+    }
+    list2.length = w2;
+  }
   function buildPlayerMapBlock() {
     const out = [];
     for (const h2 of _pendingHitEvents) {
@@ -25617,7 +25640,7 @@ var EvioSim = (() => {
         57,
         key,
         58,
-        0,
+        h2.age | 0,
         59,
         h2.victim,
         60,
@@ -25649,7 +25672,7 @@ var EvioSim = (() => {
         69,
         m2.id,
         70,
-        0,
+        m2.age | 0,
         71,
         m2.recipient,
         72,
@@ -31424,8 +31447,8 @@ var EvioSim = (() => {
         }
       }
       if (_pendingBullets.length) _pendingBullets.length = 0;
-      if (_pendingHitEvents.length) _pendingHitEvents.length = 0;
-      _pendingMedals.length = 0;
+      _ageEvents(_pendingHitEvents);
+      _ageEvents(_pendingMedals);
       if (removedEntityKeys.length) {
         for (const key of removedEntityKeys) _entityRemovalRepeat.set(key, ENTITY_REMOVAL_REPEAT);
         removedEntityKeys.length = 0;
@@ -32501,6 +32524,7 @@ var EvioSim = (() => {
     applyHit,
     tickHealthRegen,
     _pendingMedals,
+    _ageEvents,
     MEDAL_KEY,
     awardMedal,
     recordDamager,
