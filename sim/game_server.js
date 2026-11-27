@@ -5115,7 +5115,19 @@ function preTickFire(p, frames) {
   // burst after the button is released (InputReader.setForceFire, :80265), when 5 is no longer held.
   // Reading only 5 turned a Burst Rifle click into one server shot against the client's three.
   // Bots send only 5, which still works.
-  const _fireHeld = held.has(5) || held.has(18);
+  //
+  // And for a real client, 18 is the ONLY fire request. The client does not fire "whenever the
+  // trigger is held and the cooldown allows": its input reader adds 18 to a frame on a timer
+  // (setAutoFireSecondsBetweenShots = the weapon's cooldown in seconds, counted in FRAME time), and
+  // its weapon handler fires on a frame with 18 just pressed (canPlayerFire, bundle LocalWeaponHandler
+  // .onFrame). Frame time and ticks do not line up, so a held trigger fires every 2 ticks with an
+  // occasional 3 — official's server fires on exactly the ticks that carry an 18 (its pitch matched
+  // the client's 24/24 on a spray). Firing on 5 + cooldown took the occasional extra shot: our recoil
+  // ran ahead of the client's (24 -> 2 matching values), the extra shot's hit had no client sid, and
+  // the FIFO of client rays went out of step — the client's hit predictions went unconfirmed and
+  // double-counted (the false death animation). Bots never send 18, so they still fire on 5.
+  if (held.has(18)) p._sendsFirePulse = true;
+  const _fireHeld = p._sendsFirePulse ? held.has(18) : (held.has(5) || held.has(18));
   // "a shot is refused while Q3igok2 > 0 (you cannot fire mid-swap)" — bundle :43956, documented on
   // startWeaponSwitch above since we already replicate the TIMER's value (switchTimer/Q3igok2), but
   // never actually consulted it here before this fix. Applies to BOTH guns and melee — the client's

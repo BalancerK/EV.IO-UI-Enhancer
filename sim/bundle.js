@@ -26677,7 +26677,8 @@ var EvioSim = (() => {
     const _burst = _atcGate ? weaponBurst(p2.equippedWeaponId) : null;
     const _burstShot = !!(_burst && Number.isFinite(ps2.Qwx5aeh) && ps2.Qezh4wz + 1 >= _burst.cooldown && ps2.Qwx5aeh + 1 < _burst.window);
     const _fireReady = _atcGate ? ps2.Qezh4wz + 1 >= _cdTicks || _burstShot : p2.fireCooldown <= 0;
-    const _fireHeld = held.has(5) || held.has(18);
+    if (held.has(18)) p2._sendsFirePulse = true;
+    const _fireHeld = p2._sendsFirePulse ? held.has(18) : held.has(5) || held.has(18);
     if (_fireHeld && _fireReady && !(p2.switchTimer > 0)) {
       if (isGun && (p2.reloadTicks > 0 || p2.gunAmmo <= 0)) return;
       p2.fireCooldown = _cdTicks;
