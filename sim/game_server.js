@@ -7139,6 +7139,13 @@ function _integrateWithExtractedPhysics(playerState, serverTick, explicitFrames)
         ps.Qezh4wz = 0;
         armRecoil(ps, playerState.equippedWeaponId);
       }
+      // actionTickCounter (opcode 146) is this tick's value only from here: it was copied at the top
+      // of the tick, BEFORE this block stepped it (or zeroed it for a shot), so the body carried the
+      // previous tick's count. Harmless while the client never took the server's recoil state; once
+      // it corrects pitch to the server (no 6b7/6b8 pitch exemption), a correction hands it the
+      // stale count and its recoil curve runs one step off — measured as "pitchOffset server -0.007,
+      // client 0" on 141 of 149 failed checks in a jumping fight.
+      playerState.actionTickCounter = ps.Qezh4wz;
     }
     // Recoil debug (EVIO_RECOIL_DEBUG=1): log per-tick while holding fire — does the server FIRE and
     // emit a recoil pitchOffset while MOVING? Confirms/denies "no recoil during sprint/slide/fall".

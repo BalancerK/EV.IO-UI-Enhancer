@@ -27970,6 +27970,7 @@ var EvioSim = (() => {
           ps2.Qezh4wz = 0;
           armRecoil(ps2, playerState.equippedWeaponId);
         }
+        playerState.actionTickCounter = ps2.Qezh4wz;
       }
       if (RECOIL_DEBUG && playerState.heldActions && playerState.heldActions.has(5)) {
         try {
