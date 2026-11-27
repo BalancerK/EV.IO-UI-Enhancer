@@ -556,6 +556,42 @@ window.addEventListener('load', () => {
     background: rgba(255,255,255,0.14);
     border-color: rgba(255,255,255,0.35);
 }
+/* Safe-mode notice: the site's own dark, blurred panel look, at the bottom of the page (the top
+   holds the site's menu bar). */
+#ev-safe-mode {
+    position: fixed;
+    bottom: 16px;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 2147483000;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    max-width: min(760px, calc(100vw - 32px));
+    padding: 10px 14px 10px 16px;
+    background: rgba(1, 1, 1, 0.82);
+    backdrop-filter: blur(10px);
+    border-left: 3px solid #ff9800;
+    color: #fff;
+    font-family: Rajdhani, sans-serif;
+    font-size: 16px;
+    line-height: 1.3;
+}
+#ev-safe-mode .ev-safe-close {
+    flex-shrink: 0;
+    height: 30px;
+    padding: 0 12px;
+    border: 0;
+    background: rgba(255, 255, 255, 0.12);
+    color: #fff;
+    font-family: inherit;
+    font-size: 14px;
+    text-transform: uppercase;
+    cursor: pointer;
+}
+#ev-safe-mode .ev-safe-close:hover {
+    background: rgba(255, 255, 255, 0.22);
+}
 /* The native options popup ignores the page theme: options get explicit colours. */
 #ev_host_module select option {
     color: #fff;
@@ -835,6 +871,7 @@ window.addEventListener('load', () => {
             name.textContent = hostName + (isOwnLobby ? ' (yours)' : '');
 
             row.addEventListener('click', () => {
+                if (customLobbiesOff()) { showSafeModeNotice(true); return; }
                 // Own lobby or someone else's — both navigate identically, with the SAME
                 // ?evioCustom=<code> URL param. background.js's LOCAL_GAME_SOCKET_PORT handler is
                 // the one place that actually distinguishes them: it checks whether this code
@@ -1327,11 +1364,55 @@ window.addEventListener('load', () => {
 
     let localGameSocketPort = null;
 
+    // ----------------- safe mode -----------------
+    // page-socket-hook.js checks ev.io's game bundle before changing anything. When ev.io has
+    // shipped a build this extension was not made for (or its code changed under a patch, or the
+    // patched bundle crashed), the game loads unmodified and every hook passes through: SAFE MODE.
+    // Official games are untouched; custom lobbies (hosting and joining) are switched off, since
+    // they need the patches and the protocol this extension knows.
+    let extCompat = { state: 'pending', build: null, reasons: [] };
+    const customLobbiesOff = () => extCompat.state === 'safe';
+
+    function showSafeModeNotice(force) {
+        try { if (!force && sessionStorage.getItem('evioExtSafeNoticeHidden') === '1') return; } catch (e) { /* ignore */ }
+        let box = document.getElementById('ev-safe-mode');
+        if (!box) {
+            box = document.createElement('div');
+            box.id = 'ev-safe-mode';
+            box.setAttribute('role', 'status');
+            const text = document.createElement('div');
+            text.className = 'ev-safe-text';
+            const close = document.createElement('button');
+            close.type = 'button';
+            close.className = 'ev-safe-close';
+            close.textContent = 'Dismiss';
+            close.addEventListener('click', () => {
+                box.remove();
+                try { sessionStorage.setItem('evioExtSafeNoticeHidden', '1'); } catch (e) { /* ignore */ }
+            });
+            box.appendChild(text);
+            box.appendChild(close);
+            (document.body || document.documentElement).appendChild(box);
+        }
+        const what = extCompat.build && !/^1-7-1$/.test(extCompat.build)
+            ? `ev.io updated the game (build ${extCompat.build})`
+            : 'ev.io changed the game';
+        box.querySelector('.ev-safe-text').textContent =
+            `EV.IO UI Enhancer is paused: ${what}. Official games run normally; custom lobbies are off until the extension is updated.`;
+        box.title = extCompat.reasons.join('\n');
+    }
+    if (!document.body) document.addEventListener('DOMContentLoaded', () => { if (customLobbiesOff()) showSafeModeNotice(false); });
+
     window.addEventListener('message', (event) => {
         if (event.source !== window || event.origin !== window.location.origin) return;
         const msg = event.data;
         if (!msg || msg.source !== HOOK_MSG_SOURCE) return;
 
+        if (msg.type === 'compat') {
+            extCompat = { state: msg.state, build: msg.build || null, reasons: Array.isArray(msg.reasons) ? msg.reasons : [] };
+            if (extCompat.state === 'safe') showSafeModeNotice(false);
+            return;
+        }
         if (msg.type === 'socket-open-request') {
             // The page wants a new routed socket. Open (or reuse) the Port to background.js —
             // one real game socket at a time in practice, so one Port is all this needs.
@@ -1387,6 +1468,7 @@ window.addEventListener('load', () => {
     (function injectPageHook() {
         const script = document.createElement('script');
         script.src = chrome.runtime.getURL('page-socket-hook.js');
+        script.dataset.extVersion = chrome.runtime.getManifest().version;
         script.onload = function () { this.remove(); };
         (document.head || document.documentElement).appendChild(script);
     })();
@@ -2575,6 +2657,7 @@ window.addEventListener('load', () => {
     }
 
     function openHostingMenu() {
+        if (customLobbiesOff()) { showSafeModeNotice(true); return; }
         showHostModule();
     }
 

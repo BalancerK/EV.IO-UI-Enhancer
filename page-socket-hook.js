@@ -31,6 +31,39 @@
     const targetLobbyCode = new URLSearchParams(window.location.search).get('evioCustom');
     let activeSocket = null; // the one LocalSimSocket currently relayed, if any
 
+    // ── Compatibility guard ───────────────────────────────────────────────────────────────────
+    // Everything this file does to the game (the bundle patches, custom-lobby socket routing, the
+    // game file cache, early account requests, test maps) was written against one ev.io build.
+    // When ev.io ships another, a patch can land in changed code or the protocol can change, and
+    // the game must not crash because of us. So every hook stays switched off ('pending') until
+    // the game bundle has been checked (see checkBundle below), and switches on only for a build
+    // listed here whose patch anchors all match exactly once. Anything else is SAFE MODE: the
+    // original bundle loads untouched from ev.io, every hook passes straight through, and the
+    // extension's page shows why (content.js). Updating the extension for a new build = re-match
+    // the patches, then add the build here.
+    const SUPPORTED_BUILDS = ['1-7-1'];
+    // For trying a new build before release: localStorage evioExtAllowBuilds = '1-7-2' (comma list).
+    // The patch anchors are still checked.
+    const extraAllowedBuilds = () => {
+        try { return String(window.localStorage.getItem('evioExtAllowBuilds') || '').split(',').map((b) => b.trim()).filter(Boolean); }
+        catch (e) { return []; }
+    };
+    const EXT_VERSION = (document.currentScript && document.currentScript.dataset && document.currentScript.dataset.extVersion) || '';
+    let compatState = 'pending';   // 'pending' -> 'ok' (patched) or 'safe' (stock game)
+    const hooksActive = () => compatState === 'ok';
+    window.__EVIO_EXT_COMPAT__ = { state: compatState };
+    function setCompat(state, info) {
+        compatState = state;
+        window.__EVIO_EXT_COMPAT__ = { state, build: info && info.build, reasons: (info && info.reasons) || [] };
+        if (state === 'safe') {
+            console.warn('%c[evio-ext] SAFE MODE: the game runs unmodified; custom lobbies are off. Why: ' + ((info && info.reasons) || []).join(' | '),
+                'background:#ff9800;color:#000;font-weight:bold;padding:2px 6px;border-radius:3px');
+        }
+        try {
+            window.postMessage({ source: HOOK_MSG_SOURCE, type: 'compat', state, build: (info && info.build) || null, reasons: (info && info.reasons) || [] }, window.location.origin);
+        } catch (e) { /* ignore */ }
+    }
+
     function isEvioSocialSocket(url) {
         return typeof url === 'string' && url.indexOf('social.ev.io') !== -1;
     }
@@ -373,9 +406,10 @@
         try { url = typeof input === 'string' ? input : (input && input.url) || ''; } catch (e) { /* ignore */ }
         let method = 'GET';
         try { method = String((init && init.method) || (input && typeof input === 'object' && input.method) || 'GET').toUpperCase(); } catch (e) { /* ignore */ }
-        const assetKey = method === 'GET' ? assetCacheKey(url) : null;
+        const on = hooksActive();
+        const assetKey = on && method === 'GET' ? assetCacheKey(url) : null;
         const args = arguments, self = this;
-        const early = method === 'GET' ? takeEarlyStartup(url) : null;
+        const early = on && method === 'GET' ? takeEarlyStartup(url) : null;
         const p = early
             ? early.catch(() => _nativeFetch.apply(self, args))
             : assetKey
@@ -674,6 +708,7 @@
             this.__evioTestMap = null;
             this.__evioAsset = null;
             const u = typeof url === 'string' ? url : (url && url.href) || '';
+            if (!hooksActive()) return xhrOpen.apply(this, arguments);
             const m = hostingActive ? TEST_MAP_URL_RE.exec(u) : null;
             // Not opened yet: send() opens it once the bytes are here. Headers set meanwhile are kept.
             if (m) { this.__evioTestMap = { key: m[1], method, url: u, headers: [] }; return; }
@@ -858,7 +893,10 @@
 
     function RoutedWebSocket(url, protocols) {
         const urlStr = String(url || '');
-        if (hostingActive && isEvioGameSocket(urlStr)) {
+        if (hostingActive && isEvioGameSocket(urlStr) && !hooksActive()) {
+            console.warn('[evio-ext] custom lobby link opened in safe mode: connecting to ev.io as usual');
+        }
+        if (hostingActive && hooksActive() && isEvioGameSocket(urlStr)) {
             console.log('%c[evio-ext] game socket routed to our own hosted simulation', 'color:#9c27b0;font-weight:bold', urlStr);
             window.__EVIO_EXT_CUSTOM__.enabled = true;
             return new LocalSimSocket();
@@ -1008,24 +1046,92 @@
 
     function isBundle(v) { return typeof v === 'string' && v.indexOf('bundle.js') !== -1; }
 
-    function patchBundle(src) {
-        let applied = 0;
-        const skipped = [];
-        for (const p of patches) {
-            if (src.indexOf(p.from) !== -1) {
-                src = src.replace(p.from, p.to);
-                applied++;
-            } else {
-                skipped.push(p.name);
-            }
+    // The build is the folder in the bundle's address (/dist/1-7-1/public/bundle.js); the bundle's
+    // own buildIdentifier string is stale (it still says 1.6.4).
+    function bundleBuild(url) {
+        const m = /\/dist\/([^/]+)\/public\/bundle\.js/i.exec(String(url || ''));
+        return m ? m[1] : null;
+    }
+    function countOf(text, needle) {
+        let n = 0;
+        for (let i = text.indexOf(needle); i !== -1; i = text.indexOf(needle, i + needle.length)) n++;
+        return n;
+    }
+    function fnv1a(text) {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+        return (h >>> 0).toString(16);
+    }
+    // A bundle that crashed with our patches is remembered (per extension version and patch set, so
+    // re-matched patches try again) and from then on always loads unmodified.
+    const BAD_BUNDLE_KEY = 'evioExtBadBundle';
+    const PATCHES_ID = fnv1a(patches.map((p) => p.from + '\u0000' + p.to).join('\u0001'));
+    const SAFE_RELOAD_KEY = 'evioExtSafeReload';
+    function readStore(store, key) { try { return window[store].getItem(key); } catch (e) { return null; } }
+    function writeStore(store, key, v) { try { window[store].setItem(key, v); } catch (e) { /* ignore */ } }
+
+    function checkBundle(text, url) {
+        const reasons = [];
+        const build = bundleBuild(url);
+        if (!build) reasons.push('the game bundle has an unexpected address (' + String(url).split('?')[0] + ')');
+        else if (SUPPORTED_BUILDS.concat(extraAllowedBuilds()).indexOf(build) === -1) {
+            reasons.push('ev.io build ' + build + ' (this extension supports ' + SUPPORTED_BUILDS.join(', ') + ')');
         }
-        const colour = applied === patches.length ? '#4caf50' : '#ff9800';
-        console.log(
-            `%c[evio-ext] ${applied}/${patches.length} patches applied` +
-            (skipped.length ? ' | missed: ' + skipped.join(', ') : ' — ALL OK'),
-            `background:${colour};color:#000;font-weight:bold;padding:2px 6px;border-radius:3px`
-        );
+        // Each anchor must be found exactly once: missing = the code changed; twice = the patch
+        // could land in the wrong place.
+        for (const p of patches) {
+            const n = countOf(text, p.from);
+            if (n !== 1) reasons.push(p.name + ': anchor found ' + n + ' times');
+        }
+        const fingerprint = [EXT_VERSION, PATCHES_ID, build, text.length, fnv1a(text)].join('|');
+        if (readStore('localStorage', BAD_BUNDLE_KEY) === fingerprint) {
+            reasons.push('this game bundle crashed with the extension\'s changes on an earlier load');
+        }
+        return { ok: reasons.length === 0, build, fingerprint, reasons };
+    }
+
+    function patchBundle(src) {
+        for (const p of patches) src = src.replace(p.from, () => p.to);
+        console.log(`%c[evio-ext] ${patches.length}/${patches.length} patches applied — ALL OK`,
+            'background:#4caf50;color:#000;font-weight:bold;padding:2px 6px;border-radius:3px');
         return src;
+    }
+
+    function loadOriginalBundle(src) {
+        const s = _origCE.call(document, 'script');
+        s.src = src;
+        document.head.appendChild(s);
+    }
+
+    // Runs the patched bundle. An exception while it first runs (a patch broke the code) marks the
+    // bundle bad and reloads the page once, which then loads it unmodified.
+    function injectPatched(text, info) {
+        const blobUrl = URL.createObjectURL(new Blob([patchBundle(text)], { type: 'text/javascript' }));
+        let settled = false;
+        const fail = (why) => {
+            if (settled) return;
+            settled = true;
+            window.removeEventListener('error', onError, true);
+            console.error('[evio-ext] the patched game bundle failed to start (' + why + '); reloading without the extension\'s changes');
+            writeStore('localStorage', BAD_BUNDLE_KEY, info.fingerprint);
+            // One automatic reload per bundle and tab, so this can never loop.
+            if (readStore('sessionStorage', SAFE_RELOAD_KEY) !== info.fingerprint) {
+                writeStore('sessionStorage', SAFE_RELOAD_KEY, info.fingerprint);
+                window.location.reload();
+            }
+        };
+        const onError = (e) => { if (e && e.filename === blobUrl) fail(e.message || 'error'); };
+        window.addEventListener('error', onError, true);
+        const s = _origCE.call(document, 'script');
+        s.onload = () => {
+            if (settled) return;
+            settled = true;
+            window.removeEventListener('error', onError, true);
+            console.log('%c[evio-ext] bundle re-injected (post-hook-install)', 'background:#4caf50;color:#000;font-weight:bold;padding:2px 6px;border-radius:3px');
+        };
+        s.onerror = () => fail('could not load');
+        s.src = blobUrl;
+        document.head.appendChild(s);
     }
 
     let _intercepted = false;
@@ -1036,22 +1142,36 @@
         console.log('%c[evio-ext] intercepted ' + src.split('?')[0], 'color:#2196f3;font-weight:bold');
 
         fetch(src, { cache: 'no-cache' })
-            .then((res) => res.text())
+            .then((res) => {
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                return res.text();
+            })
             .then((text) => {
-                const patched = patchBundle(text);
-                const blob = new Blob([patched], { type: 'text/javascript' });
-                const s = _origCE.call(document, 'script');
-                s.src = URL.createObjectURL(blob);
-                document.head.appendChild(s);
-                console.log('%c[evio-ext] bundle re-injected (post-hook-install)', 'background:#4caf50;color:#000;font-weight:bold;padding:2px 6px;border-radius:3px');
+                const info = checkBundle(text, src);
+                if (!info.ok) {
+                    setCompat('safe', info);
+                    loadOriginalBundle(src);
+                    return;
+                }
+                setCompat('ok', info);
+                injectPatched(text, info);
             })
             .catch((err) => {
-                console.error('[evio-ext] bundle fetch/patch failed, loading original', err);
-                const s2 = _origCE.call(document, 'script');
-                s2.src = src;
-                document.head.appendChild(s2);
+                console.error('[evio-ext] bundle fetch/check failed, loading original', err);
+                setCompat('safe', { build: bundleBuild(src), reasons: ['the game bundle could not be checked (' + ((err && err.message) || err) + ')'] });
+                loadOriginalBundle(src);
             });
     }
+
+    // If the bundle is never intercepted (ev.io changed how it loads the game), every hook has
+    // stayed off; say so.
+    window.addEventListener('load', () => {
+        setTimeout(() => {
+            if (!_intercepted && compatState === 'pending') {
+                setCompat('safe', { build: null, reasons: ['the game bundle was not found (ev.io may have changed how the game loads)'] });
+            }
+        }, 15000);
+    });
 
     const _bundleObserver = new MutationObserver((muts) => {
         for (const mut of muts) {
