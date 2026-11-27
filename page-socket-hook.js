@@ -961,12 +961,21 @@
     // place for good — a respawn or a skipped tick left the two apart by a few degrees for the rest of
     // the life, which a server-built shot then missed by. Now the client takes the server's pitch like
     // its yaw, as official does. Only fields with no opcode are still carried across.
+    //
+    // The player fields live on the state's localPlayer, not on the state itself — this copied the
+    // top-level (undefined) fields from the 1-7-1 rematch on, so every correction silently reset the
+    // client's recoil accumulators: its recoil restarted from a first-shot kick, the next check failed
+    // on pitchOffset, and the corrections chained for the rest of the spray (a 56-tick run measured
+    // mid-spray after one unrelated position correction).
     window.__EVIO_EXT_PRESERVE_RECON__ = function (oldState, newState) {
         try {
             if (window.__EVIO_EXT_CUSTOM__.enabled && oldState && newState) {
-                newState.camKnockbackMin = oldState.camKnockbackMin;
-                newState.camKnockbackMax = oldState.camKnockbackMax;
-                newState.yOffsetStack = oldState.yOffsetStack;
+                const o = oldState.localPlayer, n = newState.localPlayer;
+                if (o && n) {
+                    n.camKnockbackMin = o.camKnockbackMin;
+                    n.camKnockbackMax = o.camKnockbackMax;
+                    n.yOffsetStack = o.yOffsetStack;
+                }
                 if (oldState.weapons) newState.weapons = oldState.weapons;
             }
         } catch (e) { /* ignore */ }
